@@ -1,0 +1,92 @@
+# ============================================
+# FTEX .gitignore
+# ============================================
+
+# --------------------------------------------
+# Data & Output (Large files, regeneratable)
+# --------------------------------------------
+/output/
+/reports/
+/docs/
+# Checkpoint files (contain ticket data)
+checkpoint_*.json
+
+# Keep folder structure with .gitkeep if needed
+!output/.gitkeep
+!reports/.gitkeep
+!docs/.gitkeep
+
+# --------------------------------------------
+# Generated Reports
+# --------------------------------------------
+*.xlsx
+*.docx
+analysis_report.md
+analysis_report_data.json
+deep_ai_analysis.md
+
+# --------------------------------------------
+# Environment & Secrets
+# --------------------------------------------
+.env
+*.env
+.env.*
+
+# --------------------------------------------
+# Python
+# --------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+
+# --------------------------------------------
+# Logs
+# --------------------------------------------
+*.log
+logs/
+
+# --------------------------------------------
+# IDE & Editors
+# --------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# --------------------------------------------
+# OS Files
+# --------------------------------------------
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --------------------------------------------
+# Temporary & Backup
+# --------------------------------------------
+*.tmp
+*.temp
+*.bak
+~$*
+*.orig
+
+# --------------------------------------------
+# Test & Coverage
+# --------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/

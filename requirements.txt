@@ -1,0 +1,22 @@
+# FTEX - Freshdesk Ticket Extraction & Analysis
+# Install: pip install -r requirements.txt
+
+# Core
+requests>=2.28.0
+pandas>=1.5.0
+numpy>=1.23.0
+dotenv>=1.0.0
+
+# Terminal UI
+rich>=13.0.0
+
+# Analysis
+sentence-transformers>=2.2.0
+scikit-learn>=1.2.0
+hdbscan>=0.8.29
+
+# Reports
+openpyxl>=3.1.0
+
+# Optional: For document generation (DOCX)
+# python-docx>=0.8.11
