@@ -72,6 +72,17 @@ except ImportError:
     console = None
     print("⚠️  Install 'rich' for beautiful terminal UI: pip3 install rich")
 
+# Import smart zombie detection
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'shared'))
+try:
+    from smart_detection import is_true_zombie_ticket
+except ImportError:
+    # Fallback if shared module not available
+    def is_true_zombie_ticket(ticket):
+        return len(ticket.get('conversations', [])) == 0, "No conversations"
+
 
 def print_status(msg: str, style: str = None):
     if RICH:
@@ -842,7 +853,10 @@ class TicketAnalyzer:
             
             convos = ticket.get('conversations', [])
             total_conversations += len(convos)
-            if len(convos) == 0:
+            
+            # Smart zombie detection
+            is_zombie, _ = is_true_zombie_ticket(ticket)
+            if is_zombie:
                 stats['tickets_with_no_response'] += 1
             
             for tag in ticket.get('tags', []):

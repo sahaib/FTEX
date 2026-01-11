@@ -4,6 +4,9 @@ FTEX Advanced Analytics & SLA Report Generator
 ===============================================
 Comprehensive analytics for TLs, Managers, and MDs.
 
+UPDATED: Smart zombie detection - filters out customer acknowledgments
+from "no response" counts.
+
 Features:
 - SLA compliance analysis (FRT, Resolution)
 - Agent performance metrics
@@ -21,11 +24,11 @@ import json
 import argparse
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict, Counter
 from typing import Dict, List, Optional, Tuple
-import re
 
 # Load environment variables
 try:
@@ -61,26 +64,79 @@ FRESHDESK_DOMAIN = os.getenv('FRESHDESK_DOMAIN', 'your-domain')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
+# Import smart zombie detection
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'shared'))
+try:
+    from smart_detection import is_true_zombie_ticket, clean_html, is_acknowledgment_message
+except ImportError:
+    # Fallback: inline the detection if shared module not available
+    import html as html_module
+    
+    ACKNOWLEDGMENT_PATTERNS = [
+        r'^thanks?\.?!?$',
+        r'^thank\s*you\.?!?$',
+        r'^thanks?\s+(a\s+lot|very\s+much|so\s+much)\.?!?$',
+        r'^(got\s+it|ok|okay|noted|understood|perfect|great|awesome|excellent)\.?!?$',
+        r'^(works?|working)\s*(now|fine|great|perfectly|well)?\.?!?$',
+        r'^(issue\s+)?(resolved|fixed|solved|sorted)\.?!?$',
+        r'^(you\s+)?(can|may)\s+close\s+(this|the\s+ticket|it)\.?!?',
+        r'^please\s+close\.?!?$',
+        r'^much\s+appreciated\.?!?$',
+        r'^cheers\.?!?$',
+    ]
+    COMPILED_ACK_PATTERNS = [re.compile(p, re.IGNORECASE) for p in ACKNOWLEDGMENT_PATTERNS]
+    POSITIVE_WORDS = {'thanks', 'thank', 'great', 'perfect', 'works', 'resolved', 'fixed', 'ok', 'good'}
+    
+    def clean_html(text):
+        if not text: return ""
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = html_module.unescape(text)
+        return re.sub(r'\s+', ' ', text).strip()
+    
+    def is_acknowledgment_message(text):
+        if not text: return False
+        cleaned = clean_html(text).strip()
+        if len(cleaned) > 200: return False
+        for p in COMPILED_ACK_PATTERNS:
+            if p.search(cleaned): return True
+        words = cleaned.lower().split()
+        if len(words) <= 5 and any(w.rstrip('.,!?') in POSITIVE_WORDS for w in words):
+            return True
+        return False
+    
+    def is_true_zombie_ticket(ticket):
+        convos = ticket.get('conversations', [])
+        if len(convos) == 0: return True, "No conversations"
+        sorted_convos = sorted(convos, key=lambda x: x.get('created_at', ''))
+        has_agent = any(not c.get('incoming', True) for c in sorted_convos)
+        if not has_agent:
+            last = sorted_convos[-1] if sorted_convos else None
+            if last and last.get('incoming', False):
+                body = last.get('body_text') or last.get('body', '')
+                if is_acknowledgment_message(body): return False, "Customer acknowledgment"
+                return True, "No agent response"
+            return True, "No agent response"
+        return False, "Has agent response"
+
 
 # =============================================================================
 # SLA CONFIGURATION (Customize these based on your Freshdesk SLA policies)
 # =============================================================================
 SLA_CONFIG = {
-    # First Response Time targets (in hours) by priority
     'first_response': {
-        'Urgent': 1,      # 1 hour
-        'High': 4,        # 4 hours
-        'Medium': 8,      # 8 hours (1 business day)
-        'Low': 24,        # 24 hours
+        'Urgent': 1,
+        'High': 4,
+        'Medium': 8,
+        'Low': 24,
     },
-    # Resolution Time targets (in hours) by priority
     'resolution': {
-        'Urgent': 4,      # 4 hours
-        'High': 24,       # 1 day
-        'Medium': 72,     # 3 days
-        'Low': 168,       # 7 days
+        'Urgent': 4,
+        'High': 24,
+        'Medium': 72,
+        'Low': 168,
     },
-    # Business hours (for future enhancement)
     'business_hours': {
         'start': 9,
         'end': 17,
@@ -118,15 +174,14 @@ def calculate_first_response_time(ticket: Dict) -> Optional[float]:
     
     conversations = ticket.get('conversations', [])
     
-    # Find first outgoing (agent) response
     for conv in sorted(conversations, key=lambda x: x.get('created_at', '')):
-        if conv.get('incoming') == False:  # Outgoing = agent response
+        if conv.get('incoming') == False:
             response_time = parse_datetime(conv.get('created_at'))
             if response_time:
                 delta = (response_time - created).total_seconds() / 3600
-                return max(0, delta)  # Return hours
+                return max(0, delta)
     
-    return None  # No agent response yet
+    return None
 
 
 def calculate_metrics(tickets: List[Dict]) -> Dict:
@@ -189,6 +244,10 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
     open_count = 0
     pending_count = 0
     
+    # Smart zombie tracking
+    true_zombies = 0
+    false_zombies = 0
+    
     for ticket in tickets:
         ticket_id = ticket.get('id')
         status = ticket.get('status_name', 'Unknown')
@@ -250,7 +309,6 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
             metrics['customers'][company_name]['frt_times'].append(frt)
             metrics['priorities'][priority]['frt_times'].append(frt)
             
-            # Check SLA breach
             frt_target = SLA_CONFIG['first_response'].get(priority, 24)
             if frt > frt_target:
                 total_frt_breaches += 1
@@ -270,7 +328,6 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
             if created:
                 metrics['trends']['monthly_avg_resolution'][created.strftime('%Y-%m')].append(resolution_hours)
             
-            # Check SLA breach
             res_target = SLA_CONFIG['resolution'].get(priority, 168)
             if resolution_hours > res_target:
                 total_resolution_breaches += 1
@@ -301,6 +358,13 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
         convos = ticket.get('conversations', [])
         metrics['agents'][agent_name]['conversations'].append(len(convos))
         
+        # SMART ZOMBIE DETECTION
+        is_zombie, reason = is_true_zombie_ticket(ticket)
+        if is_zombie:
+            true_zombies += 1
+        elif "acknowledgment" in reason.lower():
+            false_zombies += 1
+        
         # Detect potential escalations (high priority + long resolution)
         if priority in ['Urgent', 'High'] and resolution_hours and resolution_hours > 48:
             metrics['escalations'].append({
@@ -312,7 +376,6 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
             })
         
         # Detect potential reopens (resolved but many conversations after resolution)
-        # This is a heuristic - adjust based on your workflow
         if status in ['Resolved', 'Closed'] and len(convos) > 10:
             metrics['reopen_candidates'].append({
                 'id': ticket_id,
@@ -329,7 +392,9 @@ def calculate_metrics(tickets: List[Dict]) -> Dict:
         'pending': pending_count,
         'resolution_rate': round(resolved_count / len(tickets) * 100, 1) if tickets else 0,
         'unique_companies': len(metrics['customers']),
-        'unique_agents': len([a for a in metrics['agents'] if a != 'Unassigned'])
+        'unique_agents': len([a for a in metrics['agents'] if a != 'Unassigned']),
+        'true_zombies': true_zombies,
+        'false_zombies_filtered': false_zombies,
     }
     
     # Calculate SLA stats
@@ -377,6 +442,9 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
             '⏳ Pending',
             '📈 Resolution Rate',
             '',
+            '🧟 TRUE Zombies (Need Response)',
+            '👋 Filtered (Customer Acks)',
+            '',
             '⏱️ SLA: First Response',
             '   - Compliance %',
             '   - Avg Response Time',
@@ -398,6 +466,9 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
             metrics['overview']['pending'],
             f"{metrics['overview']['resolution_rate']}%",
             '',
+            metrics['overview']['true_zombies'],
+            metrics['overview']['false_zombies_filtered'],
+            '',
             '',
             f"{metrics['sla']['frt']['compliance_pct']}%",
             f"{metrics['sla']['frt']['avg_hours']:.1f} hrs",
@@ -415,6 +486,8 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
         'Target/Benchmark': [
             '', '', '', '', '>90%',
             '',
+            '0', '',
+            '',
             '',
             '>95%',
             '<4 hrs',
@@ -431,6 +504,9 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
         'Status': [
             '', '', '', '',
             '🟢' if metrics['overview']['resolution_rate'] > 90 else '🟡' if metrics['overview']['resolution_rate'] > 75 else '🔴',
+            '',
+            '🟢' if metrics['overview']['true_zombies'] == 0 else '🔴',
+            '🟢',
             '',
             '',
             '🟢' if metrics['sla']['frt']['compliance_pct'] > 95 else '🟡' if metrics['sla']['frt']['compliance_pct'] > 85 else '🔴',
@@ -517,7 +593,8 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
         })
     
     df_agents = pd.DataFrame(agent_data)
-    df_agents = df_agents.sort_values('SLA Score', ascending=False)
+    if not df_agents.empty:
+        df_agents = df_agents.sort_values('SLA Score', ascending=False)
     df_agents.to_excel(writer, sheet_name='3_Agent_Performance', index=False)
     
     # =========================================================================
@@ -530,11 +607,9 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
         frt_times = data['frt_times']
         res_times = data['resolution_times']
         
-        # Health score calculation (0-100)
-        # Factors: resolution rate, avg resolution time, ticket volume trend
         resolution_rate = data['resolved'] / data['total'] if data['total'] else 0
         avg_res = np.mean(res_times) if res_times else 0
-        res_score = max(0, 100 - (avg_res / 24) * 5)  # Penalize long resolution
+        res_score = max(0, 100 - (avg_res / 24) * 5)
         
         health_score = round((resolution_rate * 50 + res_score * 0.5), 1)
         
@@ -588,12 +663,12 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
     print("  ⏰ Creating Ticket Aging Analysis...")
     
     aging_data = []
+    total_open_pending = metrics['overview']['open'] + metrics['overview']['pending']
     for bucket, count in metrics['aging'].items():
         aging_data.append({
             'Age Bucket': bucket,
             'Ticket Count': count,
-            'Percentage': round(count / (metrics['overview']['open'] + metrics['overview']['pending']) * 100, 1) 
-                         if (metrics['overview']['open'] + metrics['overview']['pending']) else 0,
+            'Percentage': round(count / total_open_pending * 100, 1) if total_open_pending else 0,
             'Action': '✅ On Track' if '0-1' in bucket or '1-3' in bucket 
                      else '⚠️ Monitor' if '3-7' in bucket 
                      else '🔴 Escalate'
@@ -607,13 +682,11 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
     # =========================================================================
     print("  🕐 Creating Time Patterns...")
     
-    # By hour
     hour_data = [{'Hour': f'{h:02d}:00', 'Tickets': metrics['time_analysis']['by_hour'].get(h, 0)} 
                  for h in range(24)]
     df_hours = pd.DataFrame(hour_data)
     df_hours.to_excel(writer, sheet_name='7_Time_Patterns', index=False, startrow=0)
     
-    # By day of week
     days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     day_data = [{'Day': d, 'Tickets': metrics['time_analysis']['by_day'].get(d, 0)} for d in days_order]
     df_days = pd.DataFrame(day_data)
@@ -657,26 +730,60 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
     df_breaches.to_excel(writer, sheet_name='8_SLA_Breaches', index=False)
     
     # =========================================================================
-    # Sheet 9: Source Analysis (Manager Level)
+    # Sheet 9: TRUE Zombies (Tickets Needing Response)
+    # =========================================================================
+    print("  🧟 Creating TRUE Zombies list...")
+    
+    zombie_tickets = []
+    for ticket in tickets:
+        is_zombie, reason = is_true_zombie_ticket(ticket)
+        if is_zombie:
+            created = ticket.get('created_at', '')
+            days_open = None
+            if created:
+                try:
+                    days_open = (datetime.now() - datetime.fromisoformat(created[:10])).days
+                except:
+                    pass
+            
+            zombie_tickets.append({
+                'Ticket ID': ticket.get('id'),
+                'URL': get_freshdesk_url(ticket.get('id')),
+                'Subject': ticket.get('subject', '')[:60],
+                'Status': ticket.get('status_name'),
+                'Priority': ticket.get('priority_name'),
+                'Company': ticket.get('company', {}).get('name', 'Unknown') if ticket.get('company') else 'Unknown',
+                'Created': created[:10] if created else '',
+                'Days Open': days_open,
+                'Reason': reason,
+            })
+    
+    df_zombies = pd.DataFrame(zombie_tickets)
+    if not df_zombies.empty:
+        df_zombies = df_zombies.sort_values('Days Open', ascending=False)
+    df_zombies.to_excel(writer, sheet_name='9_TRUE_Zombies', index=False)
+    
+    # =========================================================================
+    # Sheet 10: Source Analysis (Manager Level)
     # =========================================================================
     print("  📨 Creating Source Analysis...")
     
     source_data = [{'Source': source, 'Tickets': count, 'Percentage': round(count / len(tickets) * 100, 1)}
                    for source, count in metrics['sources'].most_common()]
     df_sources = pd.DataFrame(source_data)
-    df_sources.to_excel(writer, sheet_name='9_Source_Analysis', index=False)
+    df_sources.to_excel(writer, sheet_name='10_Source_Analysis', index=False)
     
     # =========================================================================
-    # Sheet 10: Tags Analysis (Manager Level)
+    # Sheet 11: Tags Analysis (Manager Level)
     # =========================================================================
     print("  🏷️ Creating Tags Analysis...")
     
     tag_data = [{'Tag': tag, 'Count': count} for tag, count in metrics['tags'].most_common(50)]
     df_tags = pd.DataFrame(tag_data)
-    df_tags.to_excel(writer, sheet_name='10_Tags_Analysis', index=False)
+    df_tags.to_excel(writer, sheet_name='11_Tags_Analysis', index=False)
     
     # =========================================================================
-    # Sheet 11: Escalation Candidates (TL Level)
+    # Sheet 12: Escalation Candidates (TL Level)
     # =========================================================================
     print("  🚨 Creating Escalation List...")
     
@@ -691,10 +798,10 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
     } for e in sorted(metrics['escalations'], key=lambda x: x['resolution_hours'], reverse=True)[:100]]
     
     df_escalations = pd.DataFrame(escalation_data)
-    df_escalations.to_excel(writer, sheet_name='11_Escalations', index=False)
+    df_escalations.to_excel(writer, sheet_name='12_Escalations', index=False)
     
     # =========================================================================
-    # Sheet 12: SLA Config (Reference)
+    # Sheet 13: SLA Config (Reference)
     # =========================================================================
     print("  ⚙️ Creating SLA Config Reference...")
     
@@ -708,7 +815,7 @@ def generate_excel_report(tickets: List[Dict], metrics: Dict, output_path: str):
         })
     
     df_config = pd.DataFrame(config_data)
-    df_config.to_excel(writer, sheet_name='12_SLA_Config', index=False)
+    df_config.to_excel(writer, sheet_name='13_SLA_Config', index=False)
     
     # Save
     writer.close()
@@ -724,19 +831,19 @@ def print_summary(metrics: Dict):
     
     console.print()
     
-    # Executive Summary Table
     table = Table(title="📊 SLA & Analytics Summary", box=box.ROUNDED, border_style="cyan")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", justify="right", style="bold white")
     table.add_column("Status", justify="center")
     
-    # Overview
     table.add_row("Total Tickets", f"{metrics['overview']['total_tickets']:,}", "")
     table.add_row("Resolution Rate", f"{metrics['overview']['resolution_rate']}%",
                   "🟢" if metrics['overview']['resolution_rate'] > 90 else "🟡" if metrics['overview']['resolution_rate'] > 75 else "🔴")
     table.add_row("", "", "")
-    
-    # FRT SLA
+    table.add_row("TRUE Zombies", f"{metrics['overview']['true_zombies']:,}",
+                  "🟢" if metrics['overview']['true_zombies'] == 0 else "🔴")
+    table.add_row("Filtered (Acks)", f"{metrics['overview']['false_zombies_filtered']:,}", "🟢")
+    table.add_row("", "", "")
     table.add_row("FRT Compliance", f"{metrics['sla']['frt']['compliance_pct']}%",
                   "🟢" if metrics['sla']['frt']['compliance_pct'] > 95 else "🟡" if metrics['sla']['frt']['compliance_pct'] > 85 else "🔴")
     table.add_row("Avg First Response", f"{metrics['sla']['frt']['avg_hours']:.1f} hrs",
@@ -744,8 +851,6 @@ def print_summary(metrics: Dict):
     table.add_row("FRT Breaches", f"{metrics['sla']['frt']['breaches']:,}",
                   "🟢" if metrics['sla']['frt']['breaches'] == 0 else "🔴")
     table.add_row("", "", "")
-    
-    # Resolution SLA
     table.add_row("Resolution Compliance", f"{metrics['sla']['resolution']['compliance_pct']}%",
                   "🟢" if metrics['sla']['resolution']['compliance_pct'] > 90 else "🟡" if metrics['sla']['resolution']['compliance_pct'] > 75 else "🔴")
     table.add_row("Avg Resolution", f"{metrics['sla']['resolution']['avg_days']:.1f} days",
@@ -768,25 +873,18 @@ def main():
         print(f"❌ Not found: {args.input}")
         exit(1)
     
-    # Banner
     if RICH:
         console.print(Panel(
             "[bold white]📊 FTEX SLA & Analytics Report Generator[/bold white]\n"
-            "[dim]Comprehensive metrics for TLs, Managers, and MDs[/dim]",
+            "[dim]With Smart Zombie Detection[/dim]",
             border_style="cyan"
         ))
     
-    # Load tickets
     tickets = load_tickets(args.input)
     print(f"\n✅ Loaded {len(tickets):,} tickets")
     
-    # Calculate metrics
     metrics = calculate_metrics(tickets)
-    
-    # Generate report
     generate_excel_report(tickets, metrics, args.output)
-    
-    # Print summary
     print_summary(metrics)
     
     if RICH:

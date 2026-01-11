@@ -5,6 +5,9 @@ Actionable Ticket Report Generator
 Generates reports with specific ticket IDs for each finding.
 Output: Excel file with multiple sheets, each actionable.
 
+UPDATED: Smart zombie detection - filters out tickets where customer
+sent acknowledgment (thank you, thanks, etc.) which reopened the ticket.
+
 Usage:
     pip3 install pandas openpyxl
     python3 generate_actionable_report.py --input output/tickets.json
@@ -14,10 +17,10 @@ import json
 import argparse
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict, Counter
-import re
 
 # Load environment variables
 try:
@@ -51,6 +54,69 @@ FRESHDESK_DOMAIN = os.getenv('FRESHDESK_DOMAIN', 'your-domain')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
+# Import smart zombie detection from shared module
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / 'shared'))
+try:
+    from smart_detection import is_true_zombie_ticket, clean_html, is_acknowledgment_message
+except ImportError:
+    # Fallback: inline minimal detection if shared module not available
+    import html as html_module
+    
+    ACKNOWLEDGMENT_PATTERNS = [
+        r'^thanks?\.?!?$',
+        r'^thank\s*you\.?!?$',
+        r'^(got\s+it|ok|okay|noted|understood|perfect|great)\.?!?$',
+        r'^(works?|working)\s*(now|fine)?\.?!?$',
+        r'^(issue\s+)?(resolved|fixed|solved)\.?!?$',
+        r'^(you\s+)?(can|may)\s+close\.?',
+        r'^please\s+close\.?!?$',
+        r'^much\s+appreciated\.?!?$',
+        r'^cheers\.?!?$',
+    ]
+    COMPILED_ACK_PATTERNS = [re.compile(p, re.IGNORECASE) for p in ACKNOWLEDGMENT_PATTERNS]
+    POSITIVE_WORDS = {'thanks', 'thank', 'great', 'perfect', 'works', 'resolved', 'fixed', 'ok', 'good'}
+    
+    def clean_html(text):
+        if not text: return ""
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = html_module.unescape(text)
+        return re.sub(r'\s+', ' ', text).strip()
+    
+    def is_acknowledgment_message(text):
+        if not text: return False
+        cleaned = clean_html(text).strip()
+        if len(cleaned) > 200: return False
+        for p in COMPILED_ACK_PATTERNS:
+            if p.search(cleaned): return True
+        words = cleaned.lower().split()
+        if len(words) <= 5 and any(w.rstrip('.,!?') in POSITIVE_WORDS for w in words):
+            return True
+        return False
+    
+    def is_true_zombie_ticket(ticket):
+        convos = ticket.get('conversations', [])
+        if len(convos) == 0: return True, "No conversations"
+        sorted_convos = sorted(convos, key=lambda x: x.get('created_at', ''))
+        has_agent = any(not c.get('incoming', True) for c in sorted_convos)
+        if not has_agent:
+            last = sorted_convos[-1] if sorted_convos else None
+            if last and last.get('incoming', False):
+                body = last.get('body_text') or last.get('body', '')
+                if is_acknowledgment_message(body): return False, "Customer acknowledgment (not a zombie)"
+                return True, "No agent response"
+            return True, "No agent response"
+        last_agent_idx = -1
+        for i, c in enumerate(sorted_convos):
+            if not c.get('incoming', True): last_agent_idx = i
+        if last_agent_idx < len(sorted_convos) - 1:
+            msgs_after = sorted_convos[last_agent_idx + 1:]
+            all_acks = all(is_acknowledgment_message(m.get('body_text') or m.get('body', '')) 
+                          for m in msgs_after if m.get('incoming', False))
+            if all_acks: return False, "Customer acknowledgment after resolution"
+            return False, "Has agent response (pending follow-up)"
+        return False, "Has agent response"
+
 
 def load_tickets(path):
     with open(path, 'r', encoding='utf-8') as f:
@@ -70,39 +136,59 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     writer = pd.ExcelWriter(output_path, engine='openpyxl')
     
     # ==========================================================================
-    # 1. ZOMBIE TICKETS - No Response (580 tickets)
+    # 1. TRUE ZOMBIE TICKETS - No Response (Smart Detection)
     # ==========================================================================
-    print("1️⃣  Finding zombie tickets (no response)...")
+    print("1️⃣  Finding TRUE zombie tickets (smart detection)...")
     
     zombie_tickets = []
-    for t in tickets:
-        convos = t.get('conversations', [])
-        if len(convos) == 0:
-            zombie_tickets.append({
-                'Ticket ID': t.get('id'),
-                'URL': get_freshdesk_url(t.get('id')),
-                'Subject': t.get('subject', '')[:80],
-                'Status': t.get('status_name', 'Unknown'),
-                'Priority': t.get('priority_name', 'Unknown'),
-                'Company': t.get('company', {}).get('name', 'Unknown') if t.get('company') else 'Unknown',
-                'Created': t.get('created_at', '')[:10],
-                'Days Open': None,
-                'Requester Email': t.get('requester', {}).get('email', '') if t.get('requester') else ''
-            })
+    false_zombies = []  # Tickets that look like zombies but aren't
     
-    # Calculate days open
-    for z in zombie_tickets:
-        if z['Created']:
+    for t in tickets:
+        is_zombie, reason = is_true_zombie_ticket(t)
+        
+        ticket_data = {
+            'Ticket ID': t.get('id'),
+            'URL': get_freshdesk_url(t.get('id')),
+            'Subject': t.get('subject', '')[:80],
+            'Status': t.get('status_name', 'Unknown'),
+            'Priority': t.get('priority_name', 'Unknown'),
+            'Company': t.get('company', {}).get('name', 'Unknown') if t.get('company') else 'Unknown',
+            'Created': t.get('created_at', '')[:10],
+            'Days Open': None,
+            'Requester Email': t.get('requester', {}).get('email', '') if t.get('requester') else '',
+            'Conversations': len(t.get('conversations', [])),
+            'Detection Reason': reason,
+        }
+        
+        # Calculate days open
+        if ticket_data['Created']:
             try:
-                created = datetime.fromisoformat(z['Created'])
-                z['Days Open'] = (datetime.now() - created).days
+                created = datetime.fromisoformat(ticket_data['Created'])
+                ticket_data['Days Open'] = (datetime.now() - created).days
             except:
                 pass
+        
+        if is_zombie:
+            zombie_tickets.append(ticket_data)
+        else:
+            # Track false zombies (had no response but were acknowledgments)
+            if len(t.get('conversations', [])) == 0 or reason == "Customer acknowledgment after resolution":
+                false_zombies.append(ticket_data)
     
     df_zombie = pd.DataFrame(zombie_tickets)
-    df_zombie = df_zombie.sort_values('Days Open', ascending=False)
-    df_zombie.to_excel(writer, sheet_name='1_No_Response_Zombies', index=False)
-    print(f"   ✅ {len(zombie_tickets)} zombie tickets")
+    if not df_zombie.empty:
+        df_zombie = df_zombie.sort_values('Days Open', ascending=False)
+    df_zombie.to_excel(writer, sheet_name='1_TRUE_Zombies', index=False)
+    print(f"   ✅ {len(zombie_tickets)} TRUE zombie tickets (need response)")
+    print(f"   📝 {len(false_zombies)} filtered out (customer acknowledgments)")
+    
+    # ==========================================================================
+    # 1b. FALSE ZOMBIES - Acknowledgments (For Reference)
+    # ==========================================================================
+    df_false_zombie = pd.DataFrame(false_zombies)
+    if not df_false_zombie.empty:
+        df_false_zombie = df_false_zombie.sort_values('Days Open', ascending=False)
+    df_false_zombie.to_excel(writer, sheet_name='1b_Acknowledgments', index=False)
     
     # ==========================================================================
     # 2. EXTREME RESOLUTION TIME (Top 100 longest)
@@ -126,7 +212,8 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
             })
     
     df_long = pd.DataFrame(long_resolution)
-    df_long = df_long.sort_values('Resolution Hours', ascending=False)
+    if not df_long.empty:
+        df_long = df_long.sort_values('Resolution Hours', ascending=False)
     df_long.to_excel(writer, sheet_name='2_Long_Resolution_500h+', index=False)
     print(f"   ✅ {len(long_resolution)} tickets with >500 hours resolution")
     
@@ -147,6 +234,10 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
                 except:
                     pass
             
+            # Check if last message is customer acknowledgment
+            is_zombie, reason = is_true_zombie_ticket(t)
+            needs_response = "Yes" if is_zombie else "No (ack)"
+            
             open_pending.append({
                 'Ticket ID': t.get('id'),
                 'URL': get_freshdesk_url(t.get('id')),
@@ -157,11 +248,13 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
                 'Company': t.get('company', {}).get('name', 'Unknown') if t.get('company') else 'Unknown',
                 'Created': created[:10] if created else '',
                 'Last Updated': t.get('updated_at', '')[:10],
-                'Conversations': len(t.get('conversations', []))
+                'Conversations': len(t.get('conversations', [])),
+                'Needs Response': needs_response,
             })
     
     df_open = pd.DataFrame(open_pending)
-    df_open = df_open.sort_values('Days Open', ascending=False)
+    if not df_open.empty:
+        df_open = df_open.sort_values('Days Open', ascending=False)
     df_open.to_excel(writer, sheet_name='3_Open_Pending_Tickets', index=False)
     print(f"   ✅ {len(open_pending)} open/pending tickets")
     
@@ -234,10 +327,14 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
         res_times = [t.get('resolution_time_hours') for t in tix if t.get('resolution_time_hours')]
         avg_res = sum(res_times) / len(res_times) if res_times else 0
         
+        # Count true zombies for this company
+        true_zombies = sum(1 for t in tix if is_true_zombie_ticket(t)[0])
+        
         company_summary.append({
             'Company': company,
             'Total Tickets': len(tix),
             'Open/Pending': open_count,
+            'True Zombies': true_zombies,
             'Avg Resolution Hours': round(avg_res, 1),
             'Avg Resolution Days': round(avg_res / 24, 1),
             'Sample Ticket IDs': ', '.join([str(t.get('id')) for t in tix[:10]])
@@ -256,6 +353,7 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     for t in tickets:
         company = t.get('company', {}).get('name', '') if t.get('company') else ''
         if 'stolt' in company.lower():
+            is_zombie, reason = is_true_zombie_ticket(t)
             stolt_tickets.append({
                 'Ticket ID': t.get('id'),
                 'URL': get_freshdesk_url(t.get('id')),
@@ -264,7 +362,8 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
                 'Priority': t.get('priority_name', 'Unknown'),
                 'Created': t.get('created_at', '')[:10],
                 'Resolution Hours': t.get('resolution_time_hours'),
-                'Conversations': len(t.get('conversations', []))
+                'Conversations': len(t.get('conversations', [])),
+                'Needs Response': 'Yes' if is_zombie else 'No'
             })
     
     df_stolt = pd.DataFrame(stolt_tickets)
@@ -280,6 +379,7 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     for t in tickets:
         company = t.get('company', {}).get('name', '') if t.get('company') else ''
         if 'nyk' in company.lower():
+            is_zombie, reason = is_true_zombie_ticket(t)
             nyk_tickets.append({
                 'Ticket ID': t.get('id'),
                 'URL': get_freshdesk_url(t.get('id')),
@@ -288,7 +388,8 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
                 'Priority': t.get('priority_name', 'Unknown'),
                 'Created': t.get('created_at', '')[:10],
                 'Resolution Hours': t.get('resolution_time_hours'),
-                'Conversations': len(t.get('conversations', []))
+                'Conversations': len(t.get('conversations', [])),
+                'Needs Response': 'Yes' if is_zombie else 'No'
             })
     
     df_nyk = pd.DataFrame(nyk_tickets)
@@ -345,6 +446,7 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     for t in tickets:
         tags = t.get('tags', [])
         if 'Overdue' in tags or 'overdue' in [tag.lower() for tag in tags]:
+            is_zombie, reason = is_true_zombie_ticket(t)
             overdue_tickets.append({
                 'Ticket ID': t.get('id'),
                 'URL': get_freshdesk_url(t.get('id')),
@@ -353,7 +455,8 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
                 'Priority': t.get('priority_name', 'Unknown'),
                 'Company': t.get('company', {}).get('name', 'Unknown') if t.get('company') else 'Unknown',
                 'Created': t.get('created_at', '')[:10],
-                'Tags': ', '.join(tags)
+                'Tags': ', '.join(tags),
+                'Needs Response': 'Yes' if is_zombie else 'No'
             })
     
     df_overdue = pd.DataFrame(overdue_tickets)
@@ -388,7 +491,8 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     print("1️⃣2️⃣ Creating summary sheet...")
     
     summary = [
-        {'Category': '🧟 Zombie (No Response)', 'Count': len(zombie_tickets), 'Sheet': '1_No_Response_Zombies', 'Action': 'Triage - close stale or escalate'},
+        {'Category': '🧟 TRUE Zombies (Need Response)', 'Count': len(zombie_tickets), 'Sheet': '1_TRUE_Zombies', 'Action': 'Triage - respond or close'},
+        {'Category': '👋 Customer Acknowledgments', 'Count': len(false_zombies), 'Sheet': '1b_Acknowledgments', 'Action': 'Review - likely can close'},
         {'Category': '⏰ Long Resolution (>500h)', 'Count': len(long_resolution), 'Sheet': '2_Long_Resolution_500h+', 'Action': 'Investigate why stuck'},
         {'Category': '📬 Open/Pending', 'Count': len(open_pending), 'Sheet': '3_Open_Pending_Tickets', 'Action': 'Review and action'},
         {'Category': '🔑 License/Update', 'Count': len(license_tickets), 'Sheet': '4_License_Update_Automate', 'Action': 'Automation candidates'},
@@ -408,6 +512,9 @@ def generate_actionable_report(tickets, output_path="actionable_report.xlsx"):
     
     print(f"\n✅ Report saved: {output_path}")
     print(f"   📊 12 sheets with actionable ticket IDs")
+    print(f"\n   🎯 KEY INSIGHT:")
+    print(f"      Previously: {len(zombie_tickets) + len(false_zombies)} 'no response' tickets")
+    print(f"      Now: {len(zombie_tickets)} TRUE zombies (filtered {len(false_zombies)} acknowledgments)")
     
     # Print summary table
     if RICH:

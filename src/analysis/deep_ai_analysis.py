@@ -63,6 +63,16 @@ except ImportError:
     print("❌ Install required packages: pip3 install requests numpy rich")
     sys.exit(1)
 
+# Import smart zombie detection
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'shared'))
+try:
+    from smart_detection import is_true_zombie_ticket
+except ImportError:
+    # Fallback if shared module not available
+    def is_true_zombie_ticket(ticket):
+        return len(ticket.get('conversations', [])) == 0, "No conversations"
+
 
 # =============================================================================
 # CONFIGURATION
@@ -422,7 +432,10 @@ class TicketDataExtractor:
         
         resolution_times = [t.get('resolution_time_hours', 0) 
                           for t in self.tickets if t.get('resolution_time_hours')]
-        no_response = len([t for t in self.tickets if len(t.get('conversations', [])) == 0])
+        
+        # Smart zombie detection
+        no_response = len([t for t in self.tickets if is_true_zombie_ticket(t)[0]])
+        
         backlog = len([t for t in self.tickets if t.get('status_name') in ['Open', 'Pending']])
         
         company_counts = Counter()
@@ -470,7 +483,9 @@ class TicketDataExtractor:
             resolution = t.get('resolution_time_hours', 0)
             convos = t.get('conversations', [])
             
-            if len(convos) == 0:
+            # Smart zombie detection
+            is_zombie, _ = is_true_zombie_ticket(t)
+            if is_zombie:
                 samples['zombies'].append(tid)
             if resolution and resolution > Config.LONG_RESOLUTION_HOURS:
                 samples['long_resolution'].append(tid)
