@@ -6,9 +6,17 @@ requests>=2.28.0
 pandas>=1.5.0
 numpy>=1.23.0
 dotenv>=1.0.0
+openpyxl>=3.0.0
+python-dotenv>=0.20.0
 
 # Terminal UI
 rich>=13.0.0
+
+#PDF Generation
+markdown>=3.4.0
+pdfkit>=1.0.0 
+weasyprint>=57.0
+
 
 # Analysis
 sentence-transformers>=2.2.0
@@ -20,3 +28,6 @@ openpyxl>=3.1.0
 
 # Optional: For document generation (DOCX)
 # python-docx>=0.8.11
+# Note: AI requires Ollama running locally
+# Install from: https://ollama.ai
+# Recommended model: qwen3:14b
