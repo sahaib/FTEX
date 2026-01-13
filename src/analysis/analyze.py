@@ -2,23 +2,12 @@
 """
 FTEX Analyzer v6.0
 ==================
-Single-command ticket analysis with beautiful terminal UI.
+Professional analysis with beautiful Excel and PDF reports.
 
 Usage:
     python3 analyze.py                          # Analyze output/tickets.json
     python3 analyze.py --input data/tickets.json
     python3 analyze.py --no-ai                  # Statistical only
-    python3 analyze.py --clear-cache            # Force re-discovery
-
-Outputs:
-    reports/
-    ├── analysis_report.xlsx    # Multi-sheet Excel
-    ├── analysis_summary.md     # Markdown summary
-    ├── analysis_summary.pdf    # PDF version
-    └── analysis_data.json      # Raw data
-
-Author: FTEX Project
-License: MIT
 """
 
 import argparse
@@ -29,64 +18,94 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-# Rich imports for beautiful terminal UI
+# Rich imports
 try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-    from rich.layout import Layout
-    from rich.live import Live
-    from rich.text import Text
-    from rich.style import Style
     from rich import box
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
     print("⚠️  Install 'rich' for beautiful terminal UI: pip install rich")
 
+# Add parent to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+
 # Import analysis engine
 try:
-    from smart_detection import (
-        AnalysisEngine,
-        UserConfig,
-        OllamaClient,
-        get_zombie_stats,
-    )
+    from shared.smart_detection import AnalysisEngine, UserConfig, OllamaClient, get_zombie_stats
 except ImportError:
-    from src.shared.smart_detection import (
-        AnalysisEngine,
-        UserConfig,
-        OllamaClient,
-        get_zombie_stats,
-    )
+    try:
+        from src.shared.smart_detection import AnalysisEngine, UserConfig, OllamaClient, get_zombie_stats
+    except ImportError:
+        from smart_detection import AnalysisEngine, UserConfig, OllamaClient, get_zombie_stats
 
-# Excel/DataFrame support
+# Excel/DataFrame
 try:
     import pandas as pd
     PANDAS_AVAILABLE = True
 except ImportError:
     PANDAS_AVAILABLE = False
 
-# PDF support
+# PDF with reportlab
 try:
-    from weasyprint import HTML, CSS
-    PDF_AVAILABLE = True
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table as RLTable, TableStyle, PageBreak, Image
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    REPORTLAB_AVAILABLE = True
 except ImportError:
-    try:
-        from markdown import markdown
-        import pdfkit
-        PDF_AVAILABLE = True
-        PDF_ENGINE = 'pdfkit'
-    except ImportError:
-        PDF_AVAILABLE = False
-        PDF_ENGINE = None
+    REPORTLAB_AVAILABLE = False
+
+# Fallback PDF
+try:
+    from weasyprint import HTML
+    WEASYPRINT_AVAILABLE = True
+except ImportError:
+    WEASYPRINT_AVAILABLE = False
+
+
+# =============================================================================
+# COLOR PALETTE (Professional)
+# =============================================================================
+class Colors:
+    """Professional color palette for reports."""
+    # Primary
+    PRIMARY = "1F4E79"           # Dark blue
+    PRIMARY_LIGHT = "2E75B6"     # Medium blue
+    PRIMARY_LIGHTER = "BDD7EE"   # Light blue
+    
+    # Headers
+    HEADER_BG = "1F4E79"         # Dark blue
+    HEADER_TEXT = "FFFFFF"       # White
+    
+    # Rows
+    ROW_ALT = "F2F2F2"           # Light gray alternating
+    ROW_WHITE = "FFFFFF"         # White
+    
+    # Status colors
+    SUCCESS = "70AD47"           # Green
+    WARNING = "FFC000"           # Yellow/Orange
+    DANGER = "FF5050"            # Red
+    INFO = "5B9BD5"              # Blue
+    
+    # Confidence
+    HIGH_CONF = "C6EFCE"         # Light green bg
+    HIGH_CONF_TEXT = "006100"    # Dark green text
+    MED_CONF = "FFEB9C"          # Light yellow bg
+    MED_CONF_TEXT = "9C5700"     # Dark yellow text
+    LOW_CONF = "FFC7CE"          # Light red bg
+    LOW_CONF_TEXT = "9C0006"     # Dark red text
 
 
 # =============================================================================
 # TERMINAL UI
 # =============================================================================
-
 class TerminalUI:
     """Rich terminal interface."""
     
@@ -95,19 +114,12 @@ class TerminalUI:
         self.start_time = datetime.now()
     
     def print_header(self):
-        """Print application header."""
         if self.console:
-            header = Panel(
-                Text.assemble(
-                    ("FTEX Deep Analyzer", Style(color="cyan", bold=True)),
-                    "\n",
-                    ("v6.0 • Self-Validating AI Analysis", Style(color="white", dim=True)),
-                ),
-                box=box.DOUBLE,
-                border_style="cyan",
-                padding=(1, 2),
-            )
-            self.console.print(header)
+            self.console.print(Panel.fit(
+                "[bold cyan]FTEX Deep Analyzer[/bold cyan] v6.0\n"
+                "[dim]Self-Validating AI Analysis[/dim]",
+                border_style="cyan"
+            ))
             self.console.print()
         else:
             print("\n" + "="*60)
@@ -115,11 +127,10 @@ class TerminalUI:
             print("="*60 + "\n")
     
     def print_config(self, ai_available: bool, model: str = None):
-        """Print configuration summary."""
         if self.console:
             config_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
             config_table.add_column("Key", style="cyan")
-            config_table.add_column("Value", style="white")
+            config_table.add_column("Value")
             
             config_table.add_row("Product", UserConfig.PRODUCT_NAME)
             config_table.add_row("Entity Type", UserConfig.ENTITY_NAME)
@@ -136,584 +147,880 @@ class TerminalUI:
             print(f"Product: {UserConfig.PRODUCT_NAME}")
             print(f"Entity: {UserConfig.ENTITY_NAME}")
             print(f"AI: {'Available' if ai_available else 'Fallback mode'}")
-            print()
     
-    def print_loading(self, path: str, count: int):
-        """Print ticket loading status."""
+    def print_loaded(self, count: int, path: str):
         if self.console:
-            self.console.print(f"  📂 Loaded [cyan]{count:,}[/cyan] tickets from [dim]{path}[/dim]")
+            self.console.print(f"📁 Loaded [bold]{count:,}[/bold] tickets from [cyan]{path}[/cyan]")
         else:
-            print(f"  Loaded {count:,} tickets from {path}")
+            print(f"Loaded {count:,} tickets from {path}")
     
     def create_progress(self):
-        """Create progress display."""
         if self.console:
             return Progress(
                 SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(bar_width=40),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(complete_style="cyan", finished_style="green"),
                 TaskProgressColumn(),
-                console=self.console,
-                transient=False,
+                console=self.console
             )
         return None
     
-    def print_stage(self, stage: str, current: int, total: int):
-        """Print stage progress."""
-        if not self.console:
-            print(f"  [{current}/{total}] {stage}")
-    
-    def print_info(self, message: str):
-        """Print info message."""
+    def print_results(self, results: Dict):
         if self.console:
-            self.console.print(f"    [dim]→ {message}[/dim]")
-        else:
-            print(f"    → {message}")
-    
-    def print_results_summary(self, results: Dict):
-        """Print analysis results summary."""
-        if self.console:
-            self.console.print()
-            
-            # Overview table
-            overview = Table(title="📊 Analysis Results", box=box.ROUNDED, border_style="green")
-            overview.add_column("Metric", style="cyan")
-            overview.add_column("Value", justify="right")
-            
             meta = results.get('metadata', {})
-            foundation = results.get('foundation', {})
             zombies = results.get('zombies', {})
-            
-            overview.add_row("Total Tickets", f"{meta.get('total_tickets', 0):,}")
-            overview.add_row("Date Range", f"{foundation.get('date_range', {}).get('earliest', 'N/A')} → {foundation.get('date_range', {}).get('latest', 'N/A')}")
-            overview.add_row("True Zombies", f"[red]{zombies.get('true_zombie_count', 0):,}[/red] ({zombies.get('zombie_rate', 0)}%)")
-            overview.add_row("Categories Found", str(len(results.get('categories', {}))))
-            overview.add_row(f"{UserConfig.ENTITY_NAME_PLURAL.title()}", str(results.get('entities', {}).get('total_entities', 0)))
-            overview.add_row("Anomalies Detected", f"[yellow]{len(results.get('anomalies', []))}[/yellow]")
-            overview.add_row("Findings Generated", str(len(results.get('findings', []))))
-            
-            self.console.print(overview)
-            
-            # Top categories
-            categories = results.get('categories', {})
-            if categories:
-                self.console.print()
-                cat_table = Table(title="🏷️ Top Issue Categories", box=box.ROUNDED)
-                cat_table.add_column("Category", style="cyan")
-                cat_table.add_column("Tickets", justify="right")
-                cat_table.add_column("Zombies", justify="right")
-                cat_table.add_column("Avg Resolution", justify="right")
-                
-                for cat_name, cat_data in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:7]:
-                    res_days = cat_data.get('avg_resolution_days')
-                    res_str = f"{res_days:.1f}d" if res_days else "—"
-                    cat_table.add_row(
-                        cat_name,
-                        str(cat_data.get('total_tickets', 0)),
-                        f"[red]{cat_data.get('zombie_count', 0)}[/red]",
-                        res_str
-                    )
-                
-                self.console.print(cat_table)
-            
-            # Anomalies
-            anomalies = results.get('anomalies', [])
-            if anomalies:
-                self.console.print()
-                anom_table = Table(title="⚠️ Anomalies", box=box.ROUNDED, border_style="yellow")
-                anom_table.add_column("Type", style="yellow")
-                anom_table.add_column("Description")
-                anom_table.add_column("Severity", justify="center")
-                
-                for anom in anomalies[:5]:
-                    severity = anom.get('severity', 'medium')
-                    sev_style = "red" if severity == 'high' else "yellow"
-                    anom_table.add_row(
-                        anom.get('type', '').replace('_', ' '),
-                        anom.get('description', '')[:60] + "..." if len(anom.get('description', '')) > 60 else anom.get('description', ''),
-                        f"[{sev_style}]{severity}[/{sev_style}]"
-                    )
-                
-                if len(anomalies) > 5:
-                    self.console.print(f"  [dim]... and {len(anomalies) - 5} more[/dim]")
-                
-                self.console.print(anom_table)
-            
-            # SLA
             sla = results.get('sla', {})
-            if sla:
-                self.console.print()
-                sla_table = Table(title="📈 SLA Performance", box=box.ROUNDED)
-                sla_table.add_column("Metric", style="cyan")
-                sla_table.add_column("Value", justify="right")
+            
+            # Summary panel
+            summary_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+            summary_table.add_column("", style="cyan")
+            summary_table.add_column("", justify="right")
+            
+            summary_table.add_row("Total Tickets", f"[bold]{meta.get('total_tickets', 0):,}[/bold]")
+            summary_table.add_row("Categories", str(len(results.get('categories', {}))))
+            summary_table.add_row("Anomalies", str(len(results.get('anomalies', []))))
+            
+            zombie_count = zombies.get('true_zombie_count', 0)
+            zombie_rate = zombies.get('zombie_rate', 0)
+            zombie_style = "red" if zombie_rate > 10 else "yellow" if zombie_rate > 5 else "green"
+            summary_table.add_row("True Zombies", f"[{zombie_style}]{zombie_count:,} ({zombie_rate}%)[/{zombie_style}]")
+            
+            self.console.print()
+            self.console.print(Panel(summary_table, title="📊 Analysis Results", border_style="green"))
+            
+            # SLA panel
+            frt = sla.get('first_response', {})
+            res = sla.get('resolution', {})
+            
+            if frt or res:
+                sla_table = Table(show_header=True, box=box.SIMPLE)
+                sla_table.add_column("Metric")
+                sla_table.add_column("Average", justify="right")
                 sla_table.add_column("Compliance", justify="right")
                 
-                frt = sla.get('first_response', {})
-                res = sla.get('resolution', {})
-                
-                frt_compliance = frt.get('compliance_rate', 0)
-                res_compliance = res.get('compliance_rate', 0)
-                
-                frt_style = "green" if frt_compliance >= 90 else "yellow" if frt_compliance >= 70 else "red"
-                res_style = "green" if res_compliance >= 90 else "yellow" if res_compliance >= 70 else "red"
-                
+                frt_comp = frt.get('compliance_rate', 0)
+                frt_style = "green" if frt_comp >= 90 else "yellow" if frt_comp >= 70 else "red"
                 sla_table.add_row(
                     "First Response",
                     f"{frt.get('avg', 'N/A')} hrs",
-                    f"[{frt_style}]{frt_compliance}%[/{frt_style}]"
+                    f"[{frt_style}]{frt_comp}%[/{frt_style}]"
                 )
+                
+                res_comp = res.get('compliance_rate', 0)
+                res_style = "green" if res_comp >= 90 else "yellow" if res_comp >= 70 else "red"
                 sla_table.add_row(
                     "Resolution",
                     f"{res.get('avg', 'N/A')} hrs",
-                    f"[{res_style}]{res_compliance}%[/{res_style}]"
+                    f"[{res_style}]{res_comp}%[/{res_style}]"
                 )
                 
-                self.console.print(sla_table)
+                self.console.print(Panel(sla_table, title="⏱️ SLA Performance", border_style="blue"))
         else:
-            # Plain text output
-            print("\n" + "="*60)
-            print("RESULTS SUMMARY")
-            print("="*60)
+            print("\nRESULTS:")
             meta = results.get('metadata', {})
             zombies = results.get('zombies', {})
-            print(f"Total Tickets: {meta.get('total_tickets', 0):,}")
-            print(f"Zombies: {zombies.get('true_zombie_count', 0)} ({zombies.get('zombie_rate', 0)}%)")
-            print(f"Categories: {len(results.get('categories', {}))}")
-            print(f"Anomalies: {len(results.get('anomalies', []))}")
+            print(f"  Tickets: {meta.get('total_tickets', 0):,}")
+            print(f"  Zombies: {zombies.get('true_zombie_count', 0)} ({zombies.get('zombie_rate', 0)}%)")
     
     def print_outputs(self, outputs: Dict[str, str]):
-        """Print generated output files."""
         if self.console:
             self.console.print()
-            output_panel = Panel(
-                "\n".join([
-                    f"  📄 [cyan]{name}[/cyan]: {path}"
-                    for name, path in outputs.items()
-                ]),
+            self.console.print(Panel(
+                "\n".join([f"  📄 [cyan]{name}[/cyan]: {path}" for name, path in outputs.items()]),
                 title="📁 Generated Files",
                 border_style="green",
-            )
-            self.console.print(output_panel)
+            ))
         else:
             print("\nGenerated Files:")
             for name, path in outputs.items():
                 print(f"  {name}: {path}")
     
     def print_completion(self):
-        """Print completion message."""
         elapsed = (datetime.now() - self.start_time).total_seconds()
-        
         if self.console:
             self.console.print()
-            self.console.print(Panel(
-                f"[bold green]✓ Analysis complete[/bold green] in {elapsed:.1f}s",
-                border_style="green",
-            ))
+            self.console.print(Panel(f"[bold green]✓ Analysis complete[/bold green] in {elapsed:.1f}s", border_style="green"))
         else:
-            print(f"\n✓ Analysis complete in {elapsed:.1f}s")
+            print(f"\n✓ Complete in {elapsed:.1f}s")
     
     def print_error(self, message: str):
-        """Print error message."""
         if self.console:
-            self.console.print(f"[bold red]✗ Error:[/bold red] {message}")
+            self.console.print(f"[bold red]✗[/bold red] {message}")
         else:
             print(f"ERROR: {message}")
 
 
 # =============================================================================
-# REPORT GENERATOR
+# PROFESSIONAL REPORT GENERATOR
 # =============================================================================
-
 class ReportGenerator:
-    """Generates Excel, Markdown, and PDF reports."""
+    """Generate professional Excel, Markdown, and PDF reports."""
     
     def __init__(self, results: Dict, output_dir: Path):
         self.results = results
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.generated_date = datetime.now().strftime('%Y-%m-%d %H:%M')
     
     def generate_all(self) -> Dict[str, str]:
-        """Generate all report formats."""
         outputs = {}
         
-        # Excel
         if PANDAS_AVAILABLE:
             excel_path = self.generate_excel()
             if excel_path:
                 outputs['Excel Report'] = str(excel_path)
         
-        # Markdown
         md_path = self.generate_markdown()
         outputs['Markdown Summary'] = str(md_path)
         
-        # PDF
-        if PDF_AVAILABLE:
-            pdf_path = self.generate_pdf(md_path)
-            if pdf_path:
-                outputs['PDF Summary'] = str(pdf_path)
+        pdf_path = self.generate_pdf()
+        if pdf_path:
+            outputs['PDF Report'] = str(pdf_path)
         
-        # JSON
         json_path = self.generate_json()
         outputs['Raw Data'] = str(json_path)
         
         return outputs
     
+    # =========================================================================
+    # EXCEL GENERATION (Professional)
+    # =========================================================================
     def generate_excel(self) -> Optional[Path]:
-        """Generate multi-sheet Excel report."""
         if not PANDAS_AVAILABLE:
             return None
         
         try:
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, NamedStyle
+            from openpyxl.utils import get_column_letter
+            from openpyxl.formatting.rule import FormulaRule, ColorScaleRule, DataBarRule
             from openpyxl.utils.dataframe import dataframe_to_rows
         except ImportError:
             return None
         
         excel_path = self.output_dir / 'analysis_report.xlsx'
+        wb = Workbook()
         
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            # Sheet 1: Overview
-            overview_data = self._build_overview_df()
-            overview_data.to_excel(writer, sheet_name='Overview', index=False)
-            
-            # Sheet 2: Issue Categories
-            categories_data = self._build_categories_df()
-            if not categories_data.empty:
-                categories_data.to_excel(writer, sheet_name='Issue Categories', index=False)
-            
-            # Sheet 3: Entities
-            entities_data = self._build_entities_df()
-            if not entities_data.empty:
-                entities_data.to_excel(writer, sheet_name=UserConfig.ENTITY_NAME_PLURAL.title(), index=False)
-            
-            # Sheet 4: Anomalies
-            anomalies_data = self._build_anomalies_df()
-            if not anomalies_data.empty:
-                anomalies_data.to_excel(writer, sheet_name='Anomalies', index=False)
-            
-            # Sheet 5: Zombies
-            zombies_data = self._build_zombies_df()
-            if not zombies_data.empty:
-                zombies_data.to_excel(writer, sheet_name='Zombie Tickets', index=False)
-            
-            # Sheet 6: SLA Performance
-            sla_data = self._build_sla_df()
-            if not sla_data.empty:
-                sla_data.to_excel(writer, sheet_name='SLA Performance', index=False)
-            
-            # Sheet 7: Findings
-            findings_data = self._build_findings_df()
-            if not findings_data.empty:
-                findings_data.to_excel(writer, sheet_name='Findings', index=False)
-            
-            # Sheet 8: Solution Quality
-            solutions_data = self._build_solutions_df()
-            if not solutions_data.empty:
-                solutions_data.to_excel(writer, sheet_name='Solution Quality', index=False)
-            
-            # Sheet 9: Temporal Trends
-            temporal_data = self._build_temporal_df()
-            if not temporal_data.empty:
-                temporal_data.to_excel(writer, sheet_name='Monthly Trends', index=False)
+        # Define styles
+        header_font = Font(bold=True, color=Colors.HEADER_TEXT, size=11)
+        header_fill = PatternFill(start_color=Colors.HEADER_BG, end_color=Colors.HEADER_BG, fill_type="solid")
+        header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         
-        # Apply formatting
-        self._format_excel(excel_path)
+        alt_fill = PatternFill(start_color=Colors.ROW_ALT, end_color=Colors.ROW_ALT, fill_type="solid")
         
-        return excel_path
-    
-    def _build_overview_df(self) -> pd.DataFrame:
-        """Build overview DataFrame."""
+        thin_border = Border(
+            left=Side(style='thin', color='D9D9D9'),
+            right=Side(style='thin', color='D9D9D9'),
+            top=Side(style='thin', color='D9D9D9'),
+            bottom=Side(style='thin', color='D9D9D9')
+        )
+        
+        # Confidence fills
+        high_fill = PatternFill(start_color=Colors.HIGH_CONF, end_color=Colors.HIGH_CONF, fill_type="solid")
+        med_fill = PatternFill(start_color=Colors.MED_CONF, end_color=Colors.MED_CONF, fill_type="solid")
+        low_fill = PatternFill(start_color=Colors.LOW_CONF, end_color=Colors.LOW_CONF, fill_type="solid")
+        
+        # =====================================================================
+        # SHEET 1: Executive Overview
+        # =====================================================================
+        ws = wb.active
+        ws.title = "Executive Overview"
+        
         meta = self.results.get('metadata', {})
         foundation = self.results.get('foundation', {})
         zombies = self.results.get('zombies', {})
         sla = self.results.get('sla', {})
         
-        data = [
-            {'Metric': 'Total Tickets', 'Value': meta.get('total_tickets', 0)},
-            {'Metric': 'Analysis Date', 'Value': meta.get('analyzed_at', '')[:10]},
-            {'Metric': 'Date Range', 'Value': f"{foundation.get('date_range', {}).get('earliest', 'N/A')} to {foundation.get('date_range', {}).get('latest', 'N/A')}"},
-            {'Metric': 'AI Enabled', 'Value': 'Yes' if meta.get('ai_enabled') else 'No (Fallback)'},
-            {'Metric': '', 'Value': ''},
-            {'Metric': 'True Zombies', 'Value': zombies.get('true_zombie_count', 0)},
-            {'Metric': 'Zombie Rate', 'Value': f"{zombies.get('zombie_rate', 0)}%"},
-            {'Metric': 'False Positives Filtered', 'Value': zombies.get('false_positive_count', 0)},
-            {'Metric': '', 'Value': ''},
-            {'Metric': 'Issue Categories', 'Value': len(self.results.get('categories', {}))},
-            {'Metric': f'{UserConfig.ENTITY_NAME_PLURAL.title()}', 'Value': self.results.get('entities', {}).get('total_entities', 0)},
-            {'Metric': 'Anomalies Detected', 'Value': len(self.results.get('anomalies', []))},
-            {'Metric': '', 'Value': ''},
-            {'Metric': 'FRT Compliance', 'Value': f"{sla.get('first_response', {}).get('compliance_rate', 'N/A')}%"},
-            {'Metric': 'Resolution Compliance', 'Value': f"{sla.get('resolution', {}).get('compliance_rate', 'N/A')}%"},
+        # Title
+        ws['A1'] = "FTEX Analysis Report"
+        ws['A1'].font = Font(bold=True, size=18, color=Colors.PRIMARY)
+        ws.merge_cells('A1:D1')
+        
+        ws['A2'] = f"Generated: {self.generated_date}"
+        ws['A2'].font = Font(italic=True, color="666666")
+        ws.merge_cells('A2:D2')
+        
+        # Key Metrics Section
+        ws['A4'] = "KEY METRICS"
+        ws['A4'].font = Font(bold=True, size=14, color=Colors.PRIMARY)
+        
+        metrics = [
+            ("Total Tickets", meta.get('total_tickets', 0), ""),
+            ("Date Range", f"{foundation.get('date_range', {}).get('earliest', 'N/A')[:10]} to {foundation.get('date_range', {}).get('latest', 'N/A')[:10]}", ""),
+            ("Issue Categories", len(self.results.get('categories', {})), ""),
+            (f"{UserConfig.ENTITY_NAME_PLURAL.title()}", self.results.get('entities', {}).get('total_entities', 0), ""),
+            ("", "", ""),
+            ("True Zombies", zombies.get('true_zombie_count', 0), f"{zombies.get('zombie_rate', 0)}%"),
+            ("Anomalies Detected", len(self.results.get('anomalies', [])), ""),
+            ("", "", ""),
+            ("FRT Compliance", f"{sla.get('first_response', {}).get('compliance_rate', 'N/A')}%", f"Avg: {sla.get('first_response', {}).get('avg', 'N/A')} hrs"),
+            ("Resolution Compliance", f"{sla.get('resolution', {}).get('compliance_rate', 'N/A')}%", f"Avg: {sla.get('resolution', {}).get('avg', 'N/A')} hrs"),
         ]
         
-        return pd.DataFrame(data)
-    
-    def _build_categories_df(self) -> pd.DataFrame:
-        """Build categories DataFrame."""
+        for i, (label, value, extra) in enumerate(metrics, start=5):
+            ws[f'A{i}'] = label
+            ws[f'A{i}'].font = Font(bold=True) if label else Font()
+            ws[f'B{i}'] = value
+            ws[f'B{i}'].alignment = Alignment(horizontal='right')
+            ws[f'C{i}'] = extra
+            ws[f'C{i}'].font = Font(color="666666")
+            
+            # Highlight zombie row
+            if label == "True Zombies":
+                zombie_rate = zombies.get('zombie_rate', 0)
+                if zombie_rate > 10:
+                    ws[f'B{i}'].fill = PatternFill(start_color=Colors.LOW_CONF, end_color=Colors.LOW_CONF, fill_type="solid")
+                elif zombie_rate > 5:
+                    ws[f'B{i}'].fill = PatternFill(start_color=Colors.MED_CONF, end_color=Colors.MED_CONF, fill_type="solid")
+                else:
+                    ws[f'B{i}'].fill = PatternFill(start_color=Colors.HIGH_CONF, end_color=Colors.HIGH_CONF, fill_type="solid")
+        
+        ws.column_dimensions['A'].width = 25
+        ws.column_dimensions['B'].width = 20
+        ws.column_dimensions['C'].width = 25
+        
+        # =====================================================================
+        # SHEET 2: Issue Categories
+        # =====================================================================
+        ws2 = wb.create_sheet("Issue Categories")
         categories = self.results.get('categories', {})
         
-        rows = []
-        for cat_name, cat_data in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True):
-            rows.append({
-                'Category': cat_name,
-                'Description': cat_data.get('description', '')[:100],
-                'Total Tickets': cat_data.get('total_tickets', 0),
-                'Zombies': cat_data.get('zombie_count', 0),
-                'Zombie Rate %': cat_data.get('zombie_rate', 0),
-                'Avg Resolution (days)': cat_data.get('avg_resolution_days', ''),
-                'Urgent': cat_data.get('by_priority', {}).get('Urgent', 0),
-                'High': cat_data.get('by_priority', {}).get('High', 0),
-                'Medium': cat_data.get('by_priority', {}).get('Medium', 0),
-                'Low': cat_data.get('by_priority', {}).get('Low', 0),
-                'Root Causes': ', '.join(cat_data.get('typical_root_causes', [])[:3]),
-                'Sample Ticket IDs': ', '.join(map(str, cat_data.get('ticket_ids', [])[:5])),
-            })
+        headers = ['Category', 'Description', 'Tickets', 'Zombies', 'Zombie %', 'Avg Resolution (days)', 'Root Causes', 'Sample IDs']
+        for col, header in enumerate(headers, 1):
+            cell = ws2.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
         
-        return pd.DataFrame(rows)
-    
-    def _build_entities_df(self) -> pd.DataFrame:
-        """Build entities DataFrame."""
+        row = 2
+        for cat_name, cat_data in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True):
+            ws2.cell(row=row, column=1, value=cat_name).border = thin_border
+            ws2.cell(row=row, column=2, value=cat_data.get('description', '')[:80]).border = thin_border
+            ws2.cell(row=row, column=3, value=cat_data.get('total_tickets', 0)).border = thin_border
+            ws2.cell(row=row, column=4, value=cat_data.get('zombie_count', 0)).border = thin_border
+            
+            zombie_pct = cat_data.get('zombie_rate', 0)
+            cell = ws2.cell(row=row, column=5, value=zombie_pct)
+            cell.border = thin_border
+            cell.number_format = '0.0%' if zombie_pct <= 1 else '0.0'
+            if zombie_pct > 15:
+                cell.fill = low_fill
+            elif zombie_pct > 8:
+                cell.fill = med_fill
+            
+            ws2.cell(row=row, column=6, value=cat_data.get('avg_resolution_days', '')).border = thin_border
+            ws2.cell(row=row, column=7, value=', '.join(cat_data.get('typical_root_causes', [])[:2])).border = thin_border
+            ws2.cell(row=row, column=8, value=', '.join(map(str, cat_data.get('ticket_ids', [])[:5]))).border = thin_border
+            
+            # Alternating row colors
+            if row % 2 == 0:
+                for col in range(1, 9):
+                    if not ws2.cell(row=row, column=col).fill.start_color.rgb or ws2.cell(row=row, column=col).fill.start_color.rgb == '00000000':
+                        ws2.cell(row=row, column=col).fill = alt_fill
+            row += 1
+        
+        # Auto-filter and freeze
+        ws2.auto_filter.ref = f"A1:H{row-1}"
+        ws2.freeze_panes = 'A2'
+        
+        # Column widths
+        ws2.column_dimensions['A'].width = 25
+        ws2.column_dimensions['B'].width = 40
+        ws2.column_dimensions['C'].width = 10
+        ws2.column_dimensions['D'].width = 10
+        ws2.column_dimensions['E'].width = 10
+        ws2.column_dimensions['F'].width = 18
+        ws2.column_dimensions['G'].width = 35
+        ws2.column_dimensions['H'].width = 25
+        
+        # =====================================================================
+        # SHEET 3: Entities (Vessels/Stores/etc)
+        # =====================================================================
+        ws3 = wb.create_sheet(UserConfig.ENTITY_NAME_PLURAL.title())
         entities = self.results.get('entities', {}).get('entities', {})
         
-        rows = []
-        for entity_name, entity_data in sorted(entities.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:100]:
-            top_issue = entity_data.get('top_issue', ('', 0))
-            rows.append({
-                UserConfig.ENTITY_NAME.title(): entity_name,
-                'Total Tickets': entity_data.get('total_tickets', 0),
-                'Zombies': entity_data.get('zombie_count', 0),
-                'Zombie Rate %': entity_data.get('zombie_rate', 0),
-                'Top Issue': top_issue[0] if isinstance(top_issue, tuple) else top_issue,
-                'Top Issue Count': top_issue[1] if isinstance(top_issue, tuple) else '',
-                'Avg Resolution (days)': entity_data.get('avg_resolution_days', ''),
-                'First Ticket': entity_data.get('date_range', {}).get('first', ''),
-                'Last Ticket': entity_data.get('date_range', {}).get('last', ''),
-                'Sample IDs': ', '.join(map(str, entity_data.get('ticket_ids', [])[:5])),
-            })
+        headers = [UserConfig.ENTITY_NAME.title(), 'Total Tickets', 'Zombies', 'Zombie %', 'Top Issue', 'Avg Resolution (days)']
+        for col, header in enumerate(headers, 1):
+            cell = ws3.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
         
-        return pd.DataFrame(rows)
-    
-    def _build_anomalies_df(self) -> pd.DataFrame:
-        """Build anomalies DataFrame."""
+        row = 2
+        for entity_name, entity_data in sorted(entities.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:100]:
+            ws3.cell(row=row, column=1, value=entity_name).border = thin_border
+            ws3.cell(row=row, column=2, value=entity_data.get('total_tickets', 0)).border = thin_border
+            ws3.cell(row=row, column=3, value=entity_data.get('zombie_count', 0)).border = thin_border
+            
+            zombie_pct = entity_data.get('zombie_rate', 0)
+            cell = ws3.cell(row=row, column=4, value=zombie_pct)
+            cell.border = thin_border
+            if zombie_pct > 20:
+                cell.fill = low_fill
+            elif zombie_pct > 10:
+                cell.fill = med_fill
+            
+            top_issue = entity_data.get('top_issue', ('', 0))
+            ws3.cell(row=row, column=5, value=top_issue[0] if isinstance(top_issue, tuple) else str(top_issue)).border = thin_border
+            ws3.cell(row=row, column=6, value=entity_data.get('avg_resolution_days', '')).border = thin_border
+            
+            if row % 2 == 0:
+                for col in range(1, 7):
+                    if not ws3.cell(row=row, column=col).fill.start_color.rgb or ws3.cell(row=row, column=col).fill.start_color.rgb == '00000000':
+                        ws3.cell(row=row, column=col).fill = alt_fill
+            row += 1
+        
+        ws3.auto_filter.ref = f"A1:F{row-1}"
+        ws3.freeze_panes = 'A2'
+        ws3.column_dimensions['A'].width = 30
+        ws3.column_dimensions['B'].width = 12
+        ws3.column_dimensions['C'].width = 10
+        ws3.column_dimensions['D'].width = 10
+        ws3.column_dimensions['E'].width = 30
+        ws3.column_dimensions['F'].width = 18
+        
+        # =====================================================================
+        # SHEET 4: Anomalies
+        # =====================================================================
+        ws4 = wb.create_sheet("Anomalies")
         anomalies = self.results.get('anomalies', [])
         
-        rows = []
+        headers = ['Type', 'Severity', 'Entity', 'Description', 'Ticket IDs']
+        for col, header in enumerate(headers, 1):
+            cell = ws4.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+        
+        row = 2
         for anom in anomalies:
-            rows.append({
-                'Type': anom.get('type', '').replace('_', ' ').title(),
-                'Severity': anom.get('severity', 'medium').title(),
-                'Entity': anom.get('entity', ''),
-                'Description': anom.get('description', ''),
-                'Count/Days': anom.get('count', anom.get('days_apart', '')),
-                'Ticket IDs': ', '.join(map(str, anom.get('ticket_ids', [])[:5])),
-            })
+            ws4.cell(row=row, column=1, value=anom.get('type', '').replace('_', ' ').title()).border = thin_border
+            
+            severity = anom.get('severity', 'medium').lower()
+            sev_cell = ws4.cell(row=row, column=2, value=severity.title())
+            sev_cell.border = thin_border
+            if severity == 'high':
+                sev_cell.fill = low_fill
+                sev_cell.font = Font(bold=True, color=Colors.LOW_CONF_TEXT)
+            elif severity == 'medium':
+                sev_cell.fill = med_fill
+                sev_cell.font = Font(color=Colors.MED_CONF_TEXT)
+            else:
+                sev_cell.fill = high_fill
+            
+            ws4.cell(row=row, column=3, value=anom.get('entity', '')).border = thin_border
+            ws4.cell(row=row, column=4, value=anom.get('description', '')).border = thin_border
+            ws4.cell(row=row, column=5, value=', '.join(map(str, anom.get('ticket_ids', [])[:5]))).border = thin_border
+            
+            if row % 2 == 0:
+                for col in range(1, 6):
+                    if col != 2:  # Keep severity color
+                        if not ws4.cell(row=row, column=col).fill.start_color.rgb or ws4.cell(row=row, column=col).fill.start_color.rgb == '00000000':
+                            ws4.cell(row=row, column=col).fill = alt_fill
+            row += 1
         
-        return pd.DataFrame(rows)
-    
-    def _build_zombies_df(self) -> pd.DataFrame:
-        """Build zombies DataFrame."""
-        zombies = self.results.get('zombies', {}).get('true_zombies', [])
+        ws4.auto_filter.ref = f"A1:E{row-1}"
+        ws4.freeze_panes = 'A2'
+        ws4.column_dimensions['A'].width = 20
+        ws4.column_dimensions['B'].width = 12
+        ws4.column_dimensions['C'].width = 25
+        ws4.column_dimensions['D'].width = 50
+        ws4.column_dimensions['E'].width = 30
         
-        rows = []
-        for z in zombies[:200]:  # Limit to 200
-            rows.append({
-                'Ticket ID': z.get('ticket_id'),
-                'Subject': z.get('subject', '')[:80],
-                'Created': z.get('created_at', '')[:10] if z.get('created_at') else '',
-                'Status': z.get('status', ''),
-                'Priority': z.get('priority', ''),
-                'Reason': z.get('reason', ''),
-            })
+        # =====================================================================
+        # SHEET 5: Zombie Tickets (Action Required)
+        # =====================================================================
+        ws5 = wb.create_sheet("Zombie Tickets")
+        zombie_list = self.results.get('zombies', {}).get('true_zombies', [])
         
-        return pd.DataFrame(rows)
-    
-    def _build_sla_df(self) -> pd.DataFrame:
-        """Build SLA DataFrame."""
-        sla = self.results.get('sla', {})
+        # Warning header
+        ws5['A1'] = "⚠️ ACTION REQUIRED: These tickets have NO customer response"
+        ws5['A1'].font = Font(bold=True, size=12, color=Colors.LOW_CONF_TEXT)
+        ws5['A1'].fill = PatternFill(start_color=Colors.LOW_CONF, end_color=Colors.LOW_CONF, fill_type="solid")
+        ws5.merge_cells('A1:F1')
         
-        rows = []
+        headers = ['Ticket ID', 'Subject', 'Created', 'Status', 'Priority', 'Reason']
+        for col, header in enumerate(headers, 1):
+            cell = ws5.cell(row=2, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
         
-        # Overall
-        frt = sla.get('first_response', {})
-        res = sla.get('resolution', {})
+        row = 3
+        for z in zombie_list[:200]:
+            ws5.cell(row=row, column=1, value=z.get('ticket_id')).border = thin_border
+            ws5.cell(row=row, column=2, value=z.get('subject', '')[:60]).border = thin_border
+            ws5.cell(row=row, column=3, value=z.get('created_at', '')[:10] if z.get('created_at') else '').border = thin_border
+            ws5.cell(row=row, column=4, value=z.get('status', '')).border = thin_border
+            
+            priority = z.get('priority', '')
+            pri_cell = ws5.cell(row=row, column=5, value=priority)
+            pri_cell.border = thin_border
+            if priority == 'Urgent':
+                pri_cell.fill = low_fill
+                pri_cell.font = Font(bold=True)
+            elif priority == 'High':
+                pri_cell.fill = med_fill
+            
+            ws5.cell(row=row, column=6, value=z.get('reason', '')).border = thin_border
+            
+            if row % 2 == 1:
+                for col in range(1, 7):
+                    if col != 5 or not priority in ['Urgent', 'High']:
+                        if not ws5.cell(row=row, column=col).fill.start_color.rgb or ws5.cell(row=row, column=col).fill.start_color.rgb == '00000000':
+                            ws5.cell(row=row, column=col).fill = alt_fill
+            row += 1
         
-        rows.append({
-            'Priority': 'OVERALL',
-            'FRT Avg (hrs)': frt.get('avg', ''),
-            'FRT Breaches': frt.get('breach_count', ''),
-            'FRT Compliance %': frt.get('compliance_rate', ''),
-            'Resolution Avg (hrs)': res.get('avg', ''),
-            'Resolution Breaches': res.get('breach_count', ''),
-            'Resolution Compliance %': res.get('compliance_rate', ''),
-        })
+        ws5.auto_filter.ref = f"A2:F{row-1}"
+        ws5.freeze_panes = 'A3'
+        ws5.column_dimensions['A'].width = 12
+        ws5.column_dimensions['B'].width = 45
+        ws5.column_dimensions['C'].width = 12
+        ws5.column_dimensions['D'].width = 12
+        ws5.column_dimensions['E'].width = 10
+        ws5.column_dimensions['F'].width = 25
+        
+        # =====================================================================
+        # SHEET 6: SLA Performance
+        # =====================================================================
+        ws6 = wb.create_sheet("SLA Performance")
+        sla_data = self.results.get('sla', {})
+        
+        ws6['A1'] = "SLA Performance Summary"
+        ws6['A1'].font = Font(bold=True, size=14, color=Colors.PRIMARY)
+        ws6.merge_cells('A1:E1')
+        
+        headers = ['Priority', 'FRT Target (hrs)', 'FRT Avg (hrs)', 'FRT Compliance %', 'Resolution Target (hrs)', 'Resolution Avg (hrs)', 'Resolution Compliance %']
+        for col, header in enumerate(headers, 1):
+            cell = ws6.cell(row=3, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+        
+        # Overall row
+        frt = sla_data.get('first_response', {})
+        res = sla_data.get('resolution', {})
+        
+        row = 4
+        ws6.cell(row=row, column=1, value="OVERALL").font = Font(bold=True)
+        ws6.cell(row=row, column=1).border = thin_border
+        ws6.cell(row=row, column=2, value="-").border = thin_border
+        ws6.cell(row=row, column=3, value=frt.get('avg', '')).border = thin_border
+        
+        frt_comp = frt.get('compliance_rate', 0)
+        frt_cell = ws6.cell(row=row, column=4, value=frt_comp)
+        frt_cell.border = thin_border
+        if frt_comp >= 90:
+            frt_cell.fill = high_fill
+        elif frt_comp >= 70:
+            frt_cell.fill = med_fill
+        else:
+            frt_cell.fill = low_fill
+        
+        ws6.cell(row=row, column=5, value="-").border = thin_border
+        ws6.cell(row=row, column=6, value=res.get('avg', '')).border = thin_border
+        
+        res_comp = res.get('compliance_rate', 0)
+        res_cell = ws6.cell(row=row, column=7, value=res_comp)
+        res_cell.border = thin_border
+        if res_comp >= 90:
+            res_cell.fill = high_fill
+        elif res_comp >= 70:
+            res_cell.fill = med_fill
+        else:
+            res_cell.fill = low_fill
         
         # By priority
-        by_priority = sla.get('by_priority', {})
+        by_priority = sla_data.get('by_priority', {})
+        frt_targets = {'Urgent': 1, 'High': 4, 'Medium': 8, 'Low': 24}
+        res_targets = {'Urgent': 4, 'High': 24, 'Medium': 72, 'Low': 168}
+        
+        row = 5
         for priority in ['Urgent', 'High', 'Medium', 'Low']:
             p_data = by_priority.get(priority, {})
             p_frt = p_data.get('first_response', {})
             p_res = p_data.get('resolution', {})
             
-            rows.append({
-                'Priority': priority,
-                'FRT Avg (hrs)': p_frt.get('avg', ''),
-                'FRT Breaches': p_frt.get('breach_count', ''),
-                'FRT Compliance %': p_frt.get('compliance_rate', ''),
-                'Resolution Avg (hrs)': p_res.get('avg', ''),
-                'Resolution Breaches': p_res.get('breach_count', ''),
-                'Resolution Compliance %': p_res.get('compliance_rate', ''),
-            })
+            ws6.cell(row=row, column=1, value=priority).border = thin_border
+            ws6.cell(row=row, column=2, value=frt_targets.get(priority, '')).border = thin_border
+            ws6.cell(row=row, column=3, value=p_frt.get('avg', '')).border = thin_border
+            
+            p_frt_comp = p_frt.get('compliance_rate', 0)
+            cell = ws6.cell(row=row, column=4, value=p_frt_comp)
+            cell.border = thin_border
+            if p_frt_comp >= 90:
+                cell.fill = high_fill
+            elif p_frt_comp >= 70:
+                cell.fill = med_fill
+            elif p_frt_comp > 0:
+                cell.fill = low_fill
+            
+            ws6.cell(row=row, column=5, value=res_targets.get(priority, '')).border = thin_border
+            ws6.cell(row=row, column=6, value=p_res.get('avg', '')).border = thin_border
+            
+            p_res_comp = p_res.get('compliance_rate', 0)
+            cell = ws6.cell(row=row, column=7, value=p_res_comp)
+            cell.border = thin_border
+            if p_res_comp >= 90:
+                cell.fill = high_fill
+            elif p_res_comp >= 70:
+                cell.fill = med_fill
+            elif p_res_comp > 0:
+                cell.fill = low_fill
+            
+            if row % 2 == 1:
+                for col in range(1, 8):
+                    if col not in [4, 7]:
+                        ws6.cell(row=row, column=col).fill = alt_fill
+            row += 1
         
-        return pd.DataFrame(rows)
-    
-    def _build_findings_df(self) -> pd.DataFrame:
-        """Build findings DataFrame."""
+        ws6.column_dimensions['A'].width = 12
+        ws6.column_dimensions['B'].width = 16
+        ws6.column_dimensions['C'].width = 14
+        ws6.column_dimensions['D'].width = 18
+        ws6.column_dimensions['E'].width = 20
+        ws6.column_dimensions['F'].width = 18
+        ws6.column_dimensions['G'].width = 22
+        
+        # =====================================================================
+        # SHEET 7: Key Findings
+        # =====================================================================
+        ws7 = wb.create_sheet("Key Findings")
         findings = self.results.get('findings', [])
         
-        rows = []
-        for f in findings:
-            rows.append({
-                'Type': f.get('type', '').replace('_', ' ').title(),
-                'Title': f.get('title', ''),
-                'Description': f.get('description', '')[:150],
-                'Confidence': f.get('confidence', '').title(),
-                'Severity': f.get('severity', '').title(),
-                'Evidence Count': f.get('evidence_count', 0),
-                'Recommendation': f.get('recommendation', ''),
-                'Sample IDs': ', '.join(map(str, f.get('ticket_ids', [])[:5])),
-            })
+        ws7['A1'] = "Evidence-Based Findings"
+        ws7['A1'].font = Font(bold=True, size=14, color=Colors.PRIMARY)
+        ws7.merge_cells('A1:F1')
         
-        return pd.DataFrame(rows)
-    
-    def _build_solutions_df(self) -> pd.DataFrame:
-        """Build solutions DataFrame."""
-        solutions = self.results.get('solutions', {})
+        headers = ['#', 'Finding', 'Confidence', 'Severity', 'Evidence', 'Recommendation']
+        for col, header in enumerate(headers, 1):
+            cell = ws7.cell(row=3, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
         
-        rows = []
-        
-        # Summary row
-        rows.append({
-            'Type': 'SUMMARY',
-            'Ticket ID': '',
-            'Category': '',
-            'Score': solutions.get('average_score', ''),
-            'Rating': f"Analyzed: {solutions.get('analyzed', 0)}",
-            'Factors': '',
-        })
-        
-        # Best solutions
-        for sol in solutions.get('best_solutions', [])[:10]:
-            rows.append({
-                'Type': 'Best',
-                'Ticket ID': sol.get('ticket_id', ''),
-                'Category': sol.get('category', ''),
-                'Score': sol.get('score', ''),
-                'Rating': sol.get('rating', ''),
-                'Factors': ', '.join(sol.get('factors', [])),
-            })
-        
-        # Poor solutions
-        for sol in solutions.get('poor_solutions', [])[:10]:
-            rows.append({
-                'Type': 'Needs Improvement',
-                'Ticket ID': sol.get('ticket_id', ''),
-                'Category': sol.get('category', ''),
-                'Score': sol.get('score', ''),
-                'Rating': sol.get('rating', ''),
-                'Factors': ', '.join(sol.get('factors', [])),
-            })
-        
-        return pd.DataFrame(rows)
-    
-    def _build_temporal_df(self) -> pd.DataFrame:
-        """Build temporal trends DataFrame."""
-        temporal = self.results.get('temporal', {})
-        monthly = temporal.get('monthly_volume', {})
-        
-        rows = []
-        for month, count in sorted(monthly.items()):
-            rows.append({
-                'Month': month,
-                'Ticket Count': count,
-            })
-        
-        return pd.DataFrame(rows)
-    
-    def _format_excel(self, path: Path):
-        """Apply professional formatting to Excel."""
-        try:
-            from openpyxl import load_workbook
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            from openpyxl.utils import get_column_letter
+        row = 4
+        for i, f in enumerate(findings, 1):
+            ws7.cell(row=row, column=1, value=i).border = thin_border
+            ws7.cell(row=row, column=2, value=f.get('title', '')).border = thin_border
             
-            wb = load_workbook(path)
+            confidence = f.get('confidence', '').lower()
+            conf_cell = ws7.cell(row=row, column=3, value=confidence.title())
+            conf_cell.border = thin_border
+            conf_cell.alignment = Alignment(horizontal='center')
+            if confidence == 'high':
+                conf_cell.fill = high_fill
+                conf_cell.font = Font(bold=True, color=Colors.HIGH_CONF_TEXT)
+            elif confidence == 'medium':
+                conf_cell.fill = med_fill
+                conf_cell.font = Font(color=Colors.MED_CONF_TEXT)
+            else:
+                conf_cell.fill = low_fill
+                conf_cell.font = Font(color=Colors.LOW_CONF_TEXT)
             
-            # Styles
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
-            border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
+            severity = f.get('severity', '').lower()
+            sev_cell = ws7.cell(row=row, column=4, value=severity.title())
+            sev_cell.border = thin_border
+            sev_cell.alignment = Alignment(horizontal='center')
+            if severity == 'high':
+                sev_cell.fill = low_fill
+            elif severity == 'medium':
+                sev_cell.fill = med_fill
             
-            for sheet in wb.worksheets:
-                # Auto-width columns
-                for column in sheet.columns:
-                    max_length = 0
-                    column_letter = get_column_letter(column[0].column)
-                    
-                    for cell in column:
-                        try:
-                            if len(str(cell.value)) > max_length:
-                                max_length = len(str(cell.value))
-                        except:
-                            pass
-                    
-                    adjusted_width = min(max_length + 2, 50)
-                    sheet.column_dimensions[column_letter].width = adjusted_width
+            ws7.cell(row=row, column=5, value=f"{f.get('evidence_count', 0)} tickets").border = thin_border
+            ws7.cell(row=row, column=6, value=f.get('recommendation', '')).border = thin_border
+            
+            if row % 2 == 0:
+                for col in range(1, 7):
+                    if col not in [3, 4]:
+                        ws7.cell(row=row, column=col).fill = alt_fill
+            row += 1
+        
+        ws7.auto_filter.ref = f"A3:F{row-1}"
+        ws7.freeze_panes = 'A4'
+        ws7.column_dimensions['A'].width = 5
+        ws7.column_dimensions['B'].width = 45
+        ws7.column_dimensions['C'].width = 12
+        ws7.column_dimensions['D'].width = 12
+        ws7.column_dimensions['E'].width = 12
+        ws7.column_dimensions['F'].width = 50
+        
+        # Save workbook
+        wb.save(excel_path)
+        return excel_path
+    
+    # =========================================================================
+    # PDF GENERATION (Professional)
+    # =========================================================================
+    def generate_pdf(self) -> Optional[Path]:
+        pdf_path = self.output_dir / 'analysis_report.pdf'
+        
+        if REPORTLAB_AVAILABLE:
+            return self._generate_pdf_reportlab(pdf_path)
+        elif WEASYPRINT_AVAILABLE:
+            return self._generate_pdf_weasyprint(pdf_path)
+        return None
+    
+    def _generate_pdf_reportlab(self, pdf_path: Path) -> Path:
+        """Generate professional PDF with reportlab."""
+        doc = SimpleDocTemplate(
+            str(pdf_path),
+            pagesize=letter,
+            rightMargin=0.75*inch,
+            leftMargin=0.75*inch,
+            topMargin=0.75*inch,
+            bottomMargin=0.75*inch
+        )
+        
+        # Custom styles
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Title'],
+            fontSize=24,
+            textColor=colors.HexColor('#1F4E79'),
+            spaceAfter=20
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading1'],
+            fontSize=16,
+            textColor=colors.HexColor('#1F4E79'),
+            spaceBefore=20,
+            spaceAfter=10
+        )
+        
+        subheading_style = ParagraphStyle(
+            'CustomSubheading',
+            parent=styles['Heading2'],
+            fontSize=12,
+            textColor=colors.HexColor('#2E75B6'),
+            spaceBefore=15,
+            spaceAfter=8
+        )
+        
+        body_style = ParagraphStyle(
+            'CustomBody',
+            parent=styles['Normal'],
+            fontSize=10,
+            leading=14,
+            spaceAfter=8
+        )
+        
+        story = []
+        
+        # Title
+        story.append(Paragraph("FTEX Analysis Report", title_style))
+        story.append(Paragraph(f"<i>Generated: {self.generated_date}</i>", body_style))
+        story.append(Paragraph(f"<i>Product: {UserConfig.PRODUCT_NAME}</i>", body_style))
+        story.append(Spacer(1, 20))
+        
+        # Executive Summary
+        story.append(Paragraph("Executive Summary", heading_style))
+        
+        meta = self.results.get('metadata', {})
+        foundation = self.results.get('foundation', {})
+        zombies = self.results.get('zombies', {})
+        sla = self.results.get('sla', {})
+        
+        summary_data = [
+            ['Metric', 'Value'],
+            ['Total Tickets', f"{meta.get('total_tickets', 0):,}"],
+            ['Date Range', f"{foundation.get('date_range', {}).get('earliest', 'N/A')[:10]} to {foundation.get('date_range', {}).get('latest', 'N/A')[:10]}"],
+            ['Issue Categories', str(len(self.results.get('categories', {})))],
+            ['True Zombies', f"{zombies.get('true_zombie_count', 0):,} ({zombies.get('zombie_rate', 0)}%)"],
+            ['Anomalies', str(len(self.results.get('anomalies', [])))],
+        ]
+        
+        summary_table = RLTable(summary_data, colWidths=[2.5*inch, 3*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F4E79')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 1), (1, -1), 'RIGHT'),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F2F2F2')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F2F2F2')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D9D9D9')),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 20))
+        
+        # SLA Performance
+        story.append(Paragraph("SLA Performance", heading_style))
+        
+        frt = sla.get('first_response', {})
+        res = sla.get('resolution', {})
+        
+        sla_data = [
+            ['Metric', 'Average', 'Compliance'],
+            ['First Response Time', f"{frt.get('avg', 'N/A')} hours", f"{frt.get('compliance_rate', 'N/A')}%"],
+            ['Resolution Time', f"{res.get('avg', 'N/A')} hours", f"{res.get('compliance_rate', 'N/A')}%"],
+        ]
+        
+        sla_table = RLTable(sla_data, colWidths=[2*inch, 1.5*inch, 1.5*inch])
+        sla_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F4E79')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D9D9D9')),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        story.append(sla_table)
+        story.append(Spacer(1, 20))
+        
+        # Key Findings
+        findings = self.results.get('findings', [])
+        if findings:
+            story.append(Paragraph("Key Findings", heading_style))
+            
+            for i, f in enumerate(findings[:8], 1):
+                conf = f.get('confidence', '').title()
+                conf_color = '#006100' if conf == 'High' else '#9C5700' if conf == 'Medium' else '#9C0006'
                 
-                # Format header row
-                for cell in sheet[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = Alignment(horizontal='center')
-                    cell.border = border
-                
-                # Format data rows
-                for row in sheet.iter_rows(min_row=2):
-                    for cell in row:
-                        cell.border = border
-                        cell.alignment = Alignment(wrap_text=True, vertical='top')
-                
-                # Freeze header row
-                sheet.freeze_panes = 'A2'
-            
-            wb.save(path)
-            
-        except Exception as e:
-            pass  # Formatting failed, but file is still usable
+                story.append(Paragraph(
+                    f"<b>{i}. {f.get('title', 'Finding')}</b>",
+                    subheading_style
+                ))
+                story.append(Paragraph(
+                    f"<font color='{conf_color}'><b>Confidence:</b> {conf}</font> ({f.get('evidence_count', 0)} tickets)",
+                    body_style
+                ))
+                if f.get('recommendation'):
+                    story.append(Paragraph(
+                        f"<b>Recommendation:</b> {f.get('recommendation')}",
+                        body_style
+                    ))
+                story.append(Spacer(1, 10))
+        
+        # Top Issue Categories
+        story.append(PageBreak())
+        story.append(Paragraph("Top Issue Categories", heading_style))
+        
+        categories = self.results.get('categories', {})
+        cat_data = [['Category', 'Tickets', 'Zombies', 'Zombie %']]
+        for cat_name, cat_info in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:10]:
+            cat_data.append([
+                cat_name[:35],
+                str(cat_info.get('total_tickets', 0)),
+                str(cat_info.get('zombie_count', 0)),
+                f"{cat_info.get('zombie_rate', 0)}%"
+            ])
+        
+        if len(cat_data) > 1:
+            cat_table = RLTable(cat_data, colWidths=[3*inch, 1*inch, 1*inch, 1*inch])
+            cat_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F4E79')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F2F2F2')]),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D9D9D9')),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(cat_table)
+        
+        # Footer
+        story.append(Spacer(1, 30))
+        story.append(Paragraph(
+            "<i>Generated by FTEX Analyzer v6.0</i>",
+            ParagraphStyle('Footer', parent=body_style, textColor=colors.gray, alignment=TA_CENTER)
+        ))
+        
+        doc.build(story)
+        return pdf_path
     
+    def _generate_pdf_weasyprint(self, pdf_path: Path) -> Path:
+        """Fallback PDF generation with weasyprint."""
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; color: #333; }}
+                h1 {{ color: #1F4E79; border-bottom: 2px solid #1F4E79; padding-bottom: 10px; }}
+                h2 {{ color: #2E75B6; margin-top: 30px; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+                th {{ background-color: #1F4E79; color: white; padding: 10px; text-align: left; }}
+                td {{ border: 1px solid #ddd; padding: 8px; }}
+                tr:nth-child(even) {{ background-color: #f2f2f2; }}
+                .metric {{ font-size: 24px; color: #1F4E79; font-weight: bold; }}
+                .label {{ color: #666; }}
+            </style>
+        </head>
+        <body>
+            <h1>FTEX Analysis Report</h1>
+            <p><em>Generated: {self.generated_date}</em></p>
+        """
+        
+        meta = self.results.get('metadata', {})
+        zombies = self.results.get('zombies', {})
+        
+        html_content += f"""
+            <h2>Executive Summary</h2>
+            <table>
+                <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>Total Tickets</td><td>{meta.get('total_tickets', 0):,}</td></tr>
+                <tr><td>True Zombies</td><td>{zombies.get('true_zombie_count', 0):,} ({zombies.get('zombie_rate', 0)}%)</td></tr>
+                <tr><td>Issue Categories</td><td>{len(self.results.get('categories', {}))}</td></tr>
+                <tr><td>Anomalies</td><td>{len(self.results.get('anomalies', []))}</td></tr>
+            </table>
+        """
+        
+        html_content += """
+            <p style="margin-top: 50px; color: #999; text-align: center;">
+                <em>Generated by FTEX Analyzer v6.0</em>
+            </p>
+        </body>
+        </html>
+        """
+        
+        HTML(string=html_content).write_pdf(str(pdf_path))
+        return pdf_path
+    
+    # =========================================================================
+    # MARKDOWN GENERATION
+    # =========================================================================
     def generate_markdown(self) -> Path:
-        """Generate Markdown summary."""
         md_path = self.output_dir / 'analysis_summary.md'
         
         meta = self.results.get('metadata', {})
         foundation = self.results.get('foundation', {})
         zombies = self.results.get('zombies', {})
         categories = self.results.get('categories', {})
-        anomalies = self.results.get('anomalies', [])
-        sla = self.results.get('sla', {})
         findings = self.results.get('findings', [])
+        sla = self.results.get('sla', {})
         
         lines = [
             f"# FTEX Analysis Report",
             f"",
-            f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"**Generated:** {self.generated_date}",
             f"**Product:** {UserConfig.PRODUCT_NAME}",
-            f"**AI Enabled:** {'Yes' if meta.get('ai_enabled') else 'No (Fallback mode)'}",
+            f"**AI Enabled:** {'Yes' if meta.get('ai_enabled') else 'No'}",
             f"",
             f"---",
             f"",
@@ -721,78 +1028,38 @@ class ReportGenerator:
             f"",
             f"| Metric | Value |",
             f"|--------|-------|",
-            f"| Total Tickets Analyzed | {meta.get('total_tickets', 0):,} |",
-            f"| Date Range | {foundation.get('date_range', {}).get('earliest', 'N/A')} to {foundation.get('date_range', {}).get('latest', 'N/A')} |",
-            f"| **True Zombie Tickets** | **{zombies.get('true_zombie_count', 0):,}** ({zombies.get('zombie_rate', 0)}%) |",
+            f"| Total Tickets | {meta.get('total_tickets', 0):,} |",
+            f"| Date Range | {foundation.get('date_range', {}).get('earliest', 'N/A')[:10]} to {foundation.get('date_range', {}).get('latest', 'N/A')[:10]} |",
+            f"| **True Zombies** | **{zombies.get('true_zombie_count', 0):,}** ({zombies.get('zombie_rate', 0)}%) |",
             f"| Issue Categories | {len(categories)} |",
-            f"| {UserConfig.ENTITY_NAME_PLURAL.title()} Tracked | {self.results.get('entities', {}).get('total_entities', 0)} |",
-            f"| Anomalies Detected | {len(anomalies)} |",
+            f"| Anomalies | {len(self.results.get('anomalies', []))} |",
             f"",
         ]
         
         # Findings
         if findings:
-            lines.extend([
-                f"## Key Findings",
-                f"",
-            ])
-            
-            for i, finding in enumerate(findings[:10], 1):
-                confidence = finding.get('confidence', 'medium')
-                confidence_icon = "🟢" if confidence == 'high' else "🟡" if confidence == 'medium' else "🔴"
-                
-                lines.append(f"### {i}. {finding.get('title', 'Finding')}")
+            lines.extend([f"## Key Findings", f""])
+            for i, f in enumerate(findings[:10], 1):
+                conf = f.get('confidence', '').lower()
+                conf_icon = "🟢" if conf == 'high' else "🟡" if conf == 'medium' else "🔴"
+                lines.append(f"### {i}. {f.get('title', 'Finding')}")
                 lines.append(f"")
-                lines.append(f"**Confidence:** {confidence_icon} {confidence.title()} ({finding.get('evidence_count', 0)} evidence tickets)")
+                lines.append(f"**Confidence:** {conf_icon} {conf.title()} ({f.get('evidence_count', 0)} tickets)")
                 lines.append(f"")
-                lines.append(f"{finding.get('description', '')}")
+                if f.get('recommendation'):
+                    lines.append(f"**Recommendation:** {f['recommendation']}")
                 lines.append(f"")
-                
-                if finding.get('root_cause'):
-                    lines.append(f"**Root Cause:** {finding['root_cause']}")
-                    lines.append(f"")
-                
-                if finding.get('recommendation'):
-                    lines.append(f"**Recommendation:** {finding['recommendation']}")
-                    lines.append(f"")
-                
-                if finding.get('ticket_ids'):
-                    lines.append(f"**Sample Tickets:** {', '.join(map(str, finding['ticket_ids'][:5]))}")
-                    lines.append(f"")
         
-        # Anomalies
-        if anomalies:
-            lines.extend([
-                f"## Anomalies Detected",
-                f"",
-            ])
-            
-            for anom in anomalies[:10]:
-                severity_icon = "🔴" if anom.get('severity') == 'high' else "🟡"
-                lines.append(f"- {severity_icon} **{anom.get('type', '').replace('_', ' ').title()}**: {anom.get('description', '')}")
-            
-            lines.append(f"")
-        
-        # Top Categories
+        # Categories
         if categories:
-            lines.extend([
-                f"## Issue Categories",
-                f"",
-                f"| Category | Tickets | Zombies | Avg Resolution |",
-                f"|----------|---------|---------|----------------|",
-            ])
-            
-            for cat_name, cat_data in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:10]:
-                res_days = cat_data.get('avg_resolution_days')
-                res_str = f"{res_days:.1f}d" if res_days else "—"
-                lines.append(f"| {cat_name} | {cat_data.get('total_tickets', 0)} | {cat_data.get('zombie_count', 0)} | {res_str} |")
-            
+            lines.extend([f"## Top Issue Categories", f"", f"| Category | Tickets | Zombies | Zombie % |", f"|----------|---------|---------|----------|"])
+            for cat, data in sorted(categories.items(), key=lambda x: x[1].get('total_tickets', 0), reverse=True)[:10]:
+                lines.append(f"| {cat} | {data.get('total_tickets', 0)} | {data.get('zombie_count', 0)} | {data.get('zombie_rate', 0)}% |")
             lines.append(f"")
         
         # SLA
         frt = sla.get('first_response', {})
         res = sla.get('resolution', {})
-        
         lines.extend([
             f"## SLA Performance",
             f"",
@@ -801,13 +1068,8 @@ class ReportGenerator:
             f"| First Response | {frt.get('avg', 'N/A')} hrs | {frt.get('compliance_rate', 'N/A')}% |",
             f"| Resolution | {res.get('avg', 'N/A')} hrs | {res.get('compliance_rate', 'N/A')}% |",
             f"",
-        ])
-        
-        # Footer
-        lines.extend([
             f"---",
-            f"",
-            f"*Report generated by FTEX Analyzer v6.0*",
+            f"*Generated by FTEX Analyzer v6.0*",
         ])
         
         with open(md_path, 'w', encoding='utf-8') as f:
@@ -815,204 +1077,122 @@ class ReportGenerator:
         
         return md_path
     
-    def generate_pdf(self, md_path: Path) -> Optional[Path]:
-        """Generate PDF from Markdown."""
-        if not PDF_AVAILABLE:
-            return None
-        
-        pdf_path = self.output_dir / 'analysis_summary.pdf'
-        
-        try:
-            # Read markdown
-            with open(md_path, 'r', encoding='utf-8') as f:
-                md_content = f.read()
-            
-            # Convert to HTML
-            try:
-                from markdown import markdown
-                html_content = markdown(md_content, extensions=['tables', 'fenced_code'])
-            except ImportError:
-                # Basic conversion
-                html_content = f"<pre>{md_content}</pre>"
-            
-            # Wrap in HTML template
-            html_full = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-                        line-height: 1.6;
-                        max-width: 800px;
-                        margin: 0 auto;
-                        padding: 20px;
-                        color: #333;
-                    }}
-                    h1 {{ color: #2F5496; border-bottom: 2px solid #2F5496; padding-bottom: 10px; }}
-                    h2 {{ color: #2F5496; margin-top: 30px; }}
-                    h3 {{ color: #404040; }}
-                    table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                    th {{ background-color: #2F5496; color: white; }}
-                    tr:nth-child(even) {{ background-color: #f9f9f9; }}
-                    code {{ background-color: #f4f4f4; padding: 2px 6px; border-radius: 3px; }}
-                    hr {{ border: none; border-top: 1px solid #ddd; margin: 30px 0; }}
-                </style>
-            </head>
-            <body>
-                {html_content}
-            </body>
-            </html>
-            """
-            
-            # Convert to PDF
-            try:
-                from weasyprint import HTML
-                HTML(string=html_full).write_pdf(str(pdf_path))
-            except ImportError:
-                try:
-                    import pdfkit
-                    pdfkit.from_string(html_full, str(pdf_path))
-                except:
-                    return None
-            
-            return pdf_path
-            
-        except Exception as e:
-            return None
-    
+    # =========================================================================
+    # JSON EXPORT
+    # =========================================================================
     def generate_json(self) -> Path:
-        """Generate raw JSON data."""
         json_path = self.output_dir / 'analysis_data.json'
         
-        # Clean results for JSON serialization
-        clean_results = {}
-        
-        for key, value in self.results.items():
-            if key in ['zombies']:
-                # Remove ticket objects, keep IDs
-                clean_value = {k: v for k, v in value.items() if k not in ['true_zombies', 'false_positives']}
-                clean_value['zombie_ticket_ids'] = [z.get('ticket_id') for z in value.get('true_zombies', [])]
-                clean_results[key] = clean_value
-            elif key == 'entities':
-                # Simplify entity data
-                clean_results[key] = {
-                    'total_entities': value.get('total_entities', 0),
-                    'top_entities': list(value.get('entities', {}).keys())[:20],
-                }
-            else:
-                clean_results[key] = value
-        
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(clean_results, f, indent=2, default=str)
+            json.dump(self.results, f, indent=2, default=str)
         
         return json_path
 
 
 # =============================================================================
-# MAIN
+# MAIN ANALYSIS FUNCTION
 # =============================================================================
-
-def load_tickets(path: str) -> List[dict]:
-    """Load tickets from JSON file."""
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+def main(input_path: str = None, output_dir: str = None, use_ai: bool = True, 
+         clear_cache: bool = False, progress_callback=None):
+    """Run complete analysis pipeline."""
     
-    if isinstance(data, list):
-        return data
-    elif isinstance(data, dict):
-        return data.get('tickets', data.get('data', []))
-    
-    raise ValueError(f"Unknown data format in {path}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='FTEX Deep Analyzer - AI-powered ticket analysis',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    
-    parser.add_argument('--input', '-i', default='output/tickets.json',
-                       help='Input tickets JSON file')
-    parser.add_argument('--output', '-o', default='reports',
-                       help='Output directory')
-    parser.add_argument('--no-ai', action='store_true',
-                       help='Disable AI (statistical only)')
-    parser.add_argument('--clear-cache', action='store_true',
-                       help='Clear category cache')
-    
-    args = parser.parse_args()
-    
-    # Initialize UI
     ui = TerminalUI()
     ui.print_header()
     
-    # Check AI
-    ollama = OllamaClient()
-    ai_available = not args.no_ai and ollama.available
-    ui.print_config(ai_available, ollama.model if ai_available else None)
+    # Find input file
+    if input_path:
+        tickets_path = Path(input_path)
+    else:
+        for candidate in ['output/tickets.json', 'tickets.json', '../output/tickets.json']:
+            if Path(candidate).exists():
+                tickets_path = Path(candidate)
+                break
+        else:
+            ui.print_error("No tickets.json found. Run extraction first.")
+            return None
     
-    # Clear cache if requested
-    if args.clear_cache:
-        cache_path = Path(UserConfig.CACHE_FILE)
-        if cache_path.exists():
-            cache_path.unlink()
-            ui.print_info("Cache cleared")
+    if not tickets_path.exists():
+        ui.print_error(f"File not found: {tickets_path}")
+        return None
     
     # Load tickets
-    try:
-        tickets = load_tickets(args.input)
-        ui.print_loading(args.input, len(tickets))
-    except FileNotFoundError:
-        ui.print_error(f"File not found: {args.input}")
-        sys.exit(1)
-    except Exception as e:
-        ui.print_error(f"Failed to load tickets: {e}")
-        sys.exit(1)
+    with open(tickets_path, 'r', encoding='utf-8') as f:
+        tickets = json.load(f)
     
-    if not tickets:
-        ui.print_error("No tickets found in file")
-        sys.exit(1)
+    if isinstance(tickets, dict):
+        tickets = tickets.get('tickets', [])
+    
+    ui.print_loaded(len(tickets), str(tickets_path))
+    
+    # Check AI
+    ai_available = False
+    model = None
+    if use_ai:
+        client = OllamaClient()
+        ai_available = client.is_available()
+        if ai_available:
+            model = client.model
+    
+    ui.print_config(ai_available, model)
+    
+    # Clear cache if requested
+    if clear_cache:
+        cache_path = Path(output_dir or 'reports') / 'analysis_cache.json'
+        if cache_path.exists():
+            cache_path.unlink()
     
     # Run analysis
     engine = AnalysisEngine(tickets, use_ai=ai_available)
     
-    if ui.console and RICH_AVAILABLE:
-        # Rich progress
-        with ui.create_progress() as progress:
-            task = progress.add_task("Analyzing...", total=7)
+    progress = ui.create_progress()
+    if progress:
+        with progress:
+            task = progress.add_task("Analyzing...", total=100)
             
-            def progress_callback(stage_type, message, current=None, total=None):
-                if stage_type == "stage":
-                    progress.update(task, description=message, completed=current)
-                elif stage_type == "info":
-                    ui.print_info(message)
+            def update_progress(stage, pct):
+                progress.update(task, completed=pct, description=f"{stage}...")
             
-            results = engine.run_analysis(progress_callback)
+            results = engine.run_analysis(progress_callback=update_progress)
     else:
-        # Plain progress
-        def progress_callback(stage_type, message, current=None, total=None):
-            if stage_type == "stage":
-                ui.print_stage(message, current or 0, total or 7)
-            elif stage_type == "info":
-                ui.print_info(message)
-        
-        results = engine.run_analysis(progress_callback)
+        results = engine.run_analysis(progress_callback=progress_callback)
     
-    # Print results summary
-    ui.print_results_summary(results)
+    ui.print_results(results)
     
     # Generate reports
-    output_dir = Path(args.output)
-    generator = ReportGenerator(results, output_dir)
+    report_dir = Path(output_dir) if output_dir else Path('reports')
+    generator = ReportGenerator(results, report_dir)
     outputs = generator.generate_all()
     
-    # Print outputs
     ui.print_outputs(outputs)
     ui.print_completion()
+    
+    return results
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+def analyze_main(args):
+    """Entry point for CLI."""
+    return main(
+        input_path=args.input,
+        output_dir=args.output,
+        use_ai=not args.no_ai,
+        clear_cache=args.clear_cache
+    )
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='FTEX Analyzer v6.0')
+    parser.add_argument('--input', '-i', help='Input tickets.json path')
+    parser.add_argument('--output', '-o', help='Output directory', default='reports')
+    parser.add_argument('--no-ai', action='store_true', help='Disable AI analysis')
+    parser.add_argument('--clear-cache', action='store_true', help='Clear category cache')
+    
+    args = parser.parse_args()
+    main(
+        input_path=args.input,
+        output_dir=args.output,
+        use_ai=not args.no_ai,
+        clear_cache=args.clear_cache
+    )

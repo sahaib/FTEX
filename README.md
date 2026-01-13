@@ -225,7 +225,7 @@ cp .env.example .env
 # Edit .env file:
 FRESHDESK_API_KEY=your_api_key_here
 FRESHDESK_DOMAIN=yourcompany
-FRESHDESK_GROUP_ID=48000615489
+FRESHDESK_GROUP_ID=4800061xxxx
 ```
 
 ### 2. Test Connection
@@ -277,7 +277,7 @@ python3 run.py extract --days 90                    # Last 90 days
 python3 run.py extract --days 365                   # Last year
 python3 run.py extract --days 30 --no-attachments   # Skip attachments (faster)
 python3 run.py extract --resume                     # Resume interrupted extraction
-python3 run.py extract --group-id 48000615489       # Specific group
+python3 run.py extract --group-id 4800061xxxx       # Specific group
 ```
 
 | Flag | Description | Default |
@@ -426,7 +426,7 @@ FRESHDESK_API_KEY=your_api_key_here
 FRESHDESK_DOMAIN=yourcompany
 
 # Optional
-FRESHDESK_GROUP_ID=48000615489
+FRESHDESK_GROUP_ID=4800061xxxx
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:14b
 
@@ -438,7 +438,7 @@ FTEX_LOG_LEVEL=INFO
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `FRESHDESK_API_KEY` | Your Freshdesk API key | ✅ Yes |
-| `FRESHDESK_DOMAIN` | Freshdesk subdomain (e.g., `navtor`) | ✅ Yes |
+| `FRESHDESK_DOMAIN` | Freshdesk subdomain (e.g., `sahaib`) | ✅ Yes |
 | `FRESHDESK_GROUP_ID` | Default group ID to filter | No |
 | `OLLAMA_URL` | Ollama server URL | No |
 | `OLLAMA_MODEL` | Preferred LLM model | No |
