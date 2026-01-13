@@ -1149,8 +1149,10 @@ def main(input_path: str = None, output_dir: str = None, use_ai: bool = True,
         with progress:
             task = progress.add_task("Analyzing...", total=100)
             
-            def update_progress(stage, pct):
-                progress.update(task, completed=pct, description=f"{stage}...")
+            def update_progress(stage_type, message, current=0, total=1):
+                # Calculate percentage from current/total
+                pct = int((current / max(total, 1)) * 100) if total > 0 else 0
+                progress.update(task, completed=pct, description=f"{message}")
             
             results = engine.run_analysis(progress_callback=update_progress)
     else:
