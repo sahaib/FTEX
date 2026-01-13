@@ -8,6 +8,7 @@ Commands:
     python3 run.py test                     # Test API connection
     python3 run.py extract --days 180       # Extract tickets
     python3 run.py analyze                  # Run AI analysis + reports
+    python3 run.py issues                   # Issue-centric analysis (streaming)
     python3 run.py full --days 180          # Complete pipeline
 """
 
@@ -180,6 +181,89 @@ def cmd_analyze(args):
         return run_command(cmd, "Running analysis...")
 
 
+def cmd_issues(args):
+    """Run issue-centric analysis (streaming, conversation-aware)."""
+    if not Path(args.input).exists():
+        print_error(f"File not found: {args.input}")
+        print_error("Run 'python3 run.py extract' first")
+        return False
+    
+    # Try direct import
+    try:
+        from analysis.issue_analyzer import IssueAnalyzer
+        
+        analyzer = IssueAnalyzer(
+            input_path=args.input,
+            output_dir=args.output,
+            use_ai=not args.no_ai,
+            high_precision=not args.low_precision,
+            sample_size=args.sample,
+        )
+        
+        # Run with progress if Rich available
+        if console:
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+            
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task("Analyzing issues...", total=100)
+                
+                def update_progress(msg, pct):
+                    progress.update(task, completed=pct, description=msg)
+                
+                results = analyzer.run(progress_callback=update_progress)
+                progress.update(task, completed=100)
+        else:
+            results = analyzer.run()
+        
+        # Print results
+        stats = results.get('stats', {})
+        outputs = results.get('outputs', {})
+        
+        if console:
+            from rich.table import Table
+            from rich import box
+            
+            table = Table(show_header=False, box=box.SIMPLE)
+            table.add_column("", style="cyan")
+            table.add_column("", justify="right")
+            
+            table.add_row("Tickets Processed", f"{stats.get('tickets_processed', 0):,}")
+            table.add_row("Issue Clusters", f"{stats.get('clusters_created', 0):,}")
+            table.add_row("Actionable Issues", f"[green]{stats.get('actionable_issues', 0):,}[/green]")
+            table.add_row("Time", f"{stats.get('elapsed_seconds', 0):.1f}s")
+            
+            console.print()
+            console.print(Panel(table, title="📊 Issue Analysis Results", border_style="green"))
+            
+            if outputs:
+                console.print()
+                console.print(Panel(
+                    "\n".join([f"  📄 [cyan]{name}[/cyan]: {path}" for name, path in outputs.items()]),
+                    title="📁 Generated Files",
+                    border_style="green",
+                ))
+            
+            console.print()
+            console.print(Panel("[bold green]✓ Issue analysis complete[/bold green]", border_style="green"))
+        else:
+            print(f"\nResults: {stats}")
+            print(f"Outputs: {outputs}")
+        
+        return True
+        
+    except ImportError as e:
+        print_error(f"Import error: {e}")
+        print_error("Make sure all dependencies are installed: pip install ijson sentence-transformers")
+        return False
+
+
 def cmd_full(args):
     """Full pipeline: extract → analyze."""
     print_header()
@@ -297,6 +381,15 @@ Environment Variables:
     analyze.add_argument('--no-ai', action='store_true')
     analyze.add_argument('--clear-cache', action='store_true')
     
+    # ISSUES (streaming, conversation-aware)
+    issues = subparsers.add_parser('issues', help='Issue-centric analysis (streaming)')
+    issues.add_argument('--input', '-i', default='output/tickets.json')
+    issues.add_argument('--output', '-o', default='reports')
+    issues.add_argument('--sample', '-s', type=int, help='Sample N tickets (for testing)')
+    issues.add_argument('--no-ai', action='store_true', help='Disable AI enrichment')
+    issues.add_argument('--low-precision', action='store_true', 
+                        help='Use low precision for new issue detection')
+    
     # FULL
     full = subparsers.add_parser('full', help='Full pipeline')
     full.add_argument('--api-key', '-k', default=FRESHDESK_API_KEY)
@@ -320,6 +413,8 @@ Environment Variables:
         success = cmd_extract(args)
     elif args.command == 'analyze':
         success = cmd_analyze(args)
+    elif args.command == 'issues':
+        success = cmd_issues(args)
     elif args.command == 'full':
         success = cmd_full(args)
     else:
