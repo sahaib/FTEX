@@ -188,6 +188,16 @@ def cmd_issues(args):
         print_error("Run 'python3 run.py extract' first")
         return False
     
+    # Clear checkpoint if requested
+    if args.clear_checkpoint:
+        checkpoint_path = Path(args.output) / 'ai_enrichment_checkpoint.json'
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            if console:
+                console.print("[yellow]✓ Cleared AI enrichment checkpoint[/yellow]")
+            else:
+                print("✓ Cleared AI enrichment checkpoint")
+    
     # Try direct import
     try:
         from analysis.issue_analyzer import IssueAnalyzer
@@ -389,6 +399,8 @@ Environment Variables:
     issues.add_argument('--no-ai', action='store_true', help='Disable AI enrichment')
     issues.add_argument('--low-precision', action='store_true', 
                         help='Use low precision for new issue detection')
+    issues.add_argument('--clear-checkpoint', action='store_true',
+                        help='Clear AI enrichment checkpoint and start fresh')
     
     # FULL
     full = subparsers.add_parser('full', help='Full pipeline')

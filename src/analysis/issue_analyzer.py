@@ -589,18 +589,25 @@ class IssueClustering:
 
 
 # =============================================================================
-# AI ENRICHMENT
+# AI ENRICHMENT (with Checkpoint/Resume)
 # =============================================================================
 class AIEnricher:
-    """Enrich clusters with AI-generated insights."""
+    """Enrich clusters with AI-generated insights. Supports checkpoint/resume."""
     
-    def __init__(self):
+    CHECKPOINT_FILE = "ai_enrichment_checkpoint.json"
+    
+    def __init__(self, output_dir: Path = None):
         self.ollama = OllamaClient() if OllamaClient else None
         self.available = self.ollama and self.ollama.available
+        self.output_dir = output_dir or Path('reports')
+        self.checkpoint_path = self.output_dir / self.CHECKPOINT_FILE
     
     def enrich_clusters(self, clusters: List[IssueCluster], 
                         progress_callback=None) -> List[IssueCluster]:
-        """Enrich clusters with AI-generated titles, root causes, etc."""
+        """Enrich clusters with AI-generated titles, root causes, etc.
+        
+        Supports checkpoint/resume - can be interrupted and continued later.
+        """
         if not self.available:
             # Fallback: generate basic titles from text
             for cluster in clusters:
@@ -609,10 +616,55 @@ class AIEnricher:
                 cluster.is_actionable = self._is_actionable(cluster)
             return clusters
         
+        # Load existing checkpoint
+        checkpoint = self._load_checkpoint()
+        enriched_ids = set(checkpoint.get('enriched_cluster_ids', []))
+        enriched_data = {item['cluster_id']: item for item in checkpoint.get('enriched_data', [])}
+        
         total = len(clusters)
+        skipped = 0
+        processed = 0
+        start_time = datetime.now()
+        
+        # Apply already-enriched data
+        for cluster in clusters:
+            if cluster.cluster_id in enriched_data:
+                data = enriched_data[cluster.cluster_id]
+                cluster.title = data.get('title', cluster.title)
+                cluster.description = data.get('description', '')
+                cluster.root_cause = data.get('root_cause', '')
+                cluster.module = data.get('module', '')
+                cluster.severity = data.get('severity', 'medium')
+                cluster.action_recommendation = data.get('recommendation', '')
+                cluster.is_actionable = self._is_actionable(cluster)
+                skipped += 1
+        
+        if skipped > 0 and progress_callback:
+            progress_callback(f"Resumed: {skipped} clusters already enriched", 60)
+        
+        # Process remaining clusters
         for i, cluster in enumerate(clusters):
+            if cluster.cluster_id in enriched_ids:
+                continue  # Already enriched
+            
+            processed += 1
+            
+            # Calculate ETA
+            if processed > 1:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                avg_time = elapsed / (processed - 1)
+                remaining = total - skipped - processed
+                eta_seconds = int(avg_time * remaining)
+                eta_str = self._format_eta(eta_seconds)
+            else:
+                eta_str = "calculating..."
+            
             if progress_callback:
-                progress_callback(f"AI enriching cluster {i+1}/{total}", 60 + int(30 * i / total))
+                pct = 60 + int(30 * (skipped + processed) / total)
+                progress_callback(
+                    f"AI enriching {skipped + processed}/{total} (ETA: {eta_str})",
+                    pct
+                )
             
             try:
                 enriched = self._enrich_single_cluster(cluster)
@@ -622,6 +674,10 @@ class AIEnricher:
                 cluster.module = enriched.get('module', '')
                 cluster.severity = enriched.get('severity', 'medium')
                 cluster.action_recommendation = enriched.get('recommendation', '')
+                
+                # Save to checkpoint immediately
+                self._save_cluster_to_checkpoint(cluster)
+                
             except Exception as e:
                 # Fallback on error
                 cluster.title = self._generate_basic_title(cluster)
@@ -629,7 +685,73 @@ class AIEnricher:
             
             cluster.is_actionable = self._is_actionable(cluster)
         
+        # Clear checkpoint on successful completion
+        if processed > 0:
+            self._finalize_checkpoint()
+        
         return clusters
+    
+    def _load_checkpoint(self) -> Dict:
+        """Load checkpoint file if exists."""
+        if self.checkpoint_path.exists():
+            try:
+                with open(self.checkpoint_path, 'r') as f:
+                    checkpoint = json.load(f)
+                    print(f"📂 Loaded checkpoint: {len(checkpoint.get('enriched_cluster_ids', []))} clusters already enriched")
+                    return checkpoint
+            except Exception as e:
+                print(f"⚠️ Could not load checkpoint: {e}")
+        return {'enriched_cluster_ids': [], 'enriched_data': []}
+    
+    def _save_cluster_to_checkpoint(self, cluster: IssueCluster):
+        """Save a single cluster to checkpoint file."""
+        checkpoint = self._load_checkpoint() if self.checkpoint_path.exists() else {
+            'enriched_cluster_ids': [],
+            'enriched_data': [],
+            'started_at': datetime.now().isoformat(),
+        }
+        
+        # Add this cluster
+        if cluster.cluster_id not in checkpoint['enriched_cluster_ids']:
+            checkpoint['enriched_cluster_ids'].append(cluster.cluster_id)
+            checkpoint['enriched_data'].append({
+                'cluster_id': cluster.cluster_id,
+                'title': cluster.title,
+                'description': cluster.description,
+                'root_cause': cluster.root_cause,
+                'module': cluster.module,
+                'severity': cluster.severity,
+                'recommendation': cluster.action_recommendation,
+            })
+        
+        checkpoint['last_updated'] = datetime.now().isoformat()
+        checkpoint['total_enriched'] = len(checkpoint['enriched_cluster_ids'])
+        
+        # Save atomically
+        temp_path = self.checkpoint_path.with_suffix('.tmp')
+        with open(temp_path, 'w') as f:
+            json.dump(checkpoint, f, indent=2)
+        temp_path.rename(self.checkpoint_path)
+    
+    def _finalize_checkpoint(self):
+        """Mark checkpoint as complete."""
+        if self.checkpoint_path.exists():
+            checkpoint = self._load_checkpoint()
+            checkpoint['completed'] = True
+            checkpoint['completed_at'] = datetime.now().isoformat()
+            with open(self.checkpoint_path, 'w') as f:
+                json.dump(checkpoint, f, indent=2)
+    
+    def _format_eta(self, seconds: int) -> str:
+        """Format seconds as human-readable ETA."""
+        if seconds < 60:
+            return f"{seconds}s"
+        elif seconds < 3600:
+            return f"{seconds // 60}m {seconds % 60}s"
+        else:
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours}h {minutes}m"
     
     def _enrich_single_cluster(self, cluster: IssueCluster) -> Dict:
         """Use AI to enrich a single cluster."""
@@ -1295,6 +1417,7 @@ class IssueAnalyzer:
                  sample_size: Optional[int] = None):
         self.input_path = input_path
         self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)  # Ensure dir exists for checkpoints
         self.use_ai = use_ai
         self.high_precision = high_precision
         self.sample_size = sample_size
@@ -1302,7 +1425,7 @@ class IssueAnalyzer:
         self.parser = StreamingTicketParser(input_path)
         self.extractor = IssueExtractor(high_precision=high_precision)
         self.clusterer = IssueClustering()
-        self.enricher = AIEnricher() if use_ai else None
+        self.enricher = AIEnricher(output_dir=self.output_dir) if use_ai else None
     
     def run(self, progress_callback=None) -> Dict[str, Any]:
         """Run the complete analysis pipeline."""
