@@ -160,15 +160,13 @@ def cmd_analyze(args):
     try:
         from analysis.analyze import main as analyze_main
         
-        original_argv = sys.argv
-        sys.argv = ['analyze.py', '--input', args.input, '--output', args.output]
-        if args.no_ai:
-            sys.argv.append('--no-ai')
-        if args.clear_cache:
-            sys.argv.append('--clear-cache')
-        
-        analyze_main()
-        sys.argv = original_argv
+        # Call main() with keyword arguments directly
+        analyze_main(
+            input_path=args.input,
+            output_dir=args.output,
+            use_ai=not args.no_ai,
+            clear_cache=args.clear_cache
+        )
         return True
     except ImportError:
         # Subprocess fallback

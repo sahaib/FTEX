@@ -1129,7 +1129,7 @@ def main(input_path: str = None, output_dir: str = None, use_ai: bool = True,
     model = None
     if use_ai:
         client = OllamaClient()
-        ai_available = client.is_available()
+        ai_available = client.available  # Property, not method
         if ai_available:
             model = client.model
     
