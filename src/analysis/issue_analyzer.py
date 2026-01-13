@@ -117,6 +117,13 @@ class IssueCluster:
     last_seen: str = ""
     is_actionable: bool = False
     action_recommendation: str = ""
+    # NEW: Detailed fields from deep AI analysis
+    sub_issues: List[str] = field(default_factory=list)
+    affected_vessels: List[str] = field(default_factory=list)
+    error_codes: List[str] = field(default_factory=list)
+    affected_versions: List[str] = field(default_factory=list)
+    specific_features: List[str] = field(default_factory=list)
+    is_noise: bool = False
 
 
 # =============================================================================
@@ -636,6 +643,13 @@ class AIEnricher:
                 cluster.module = data.get('module', '')
                 cluster.severity = data.get('severity', 'medium')
                 cluster.action_recommendation = data.get('recommendation', '')
+                # NEW: Restore detailed fields
+                cluster.sub_issues = data.get('sub_issues', [])
+                cluster.is_noise = data.get('is_noise', False)
+                cluster.affected_vessels = data.get('affected_vessels', [])
+                cluster.error_codes = data.get('error_codes', [])
+                cluster.affected_versions = data.get('affected_versions', [])
+                cluster.specific_features = data.get('specific_features', [])
                 cluster.is_actionable = self._is_actionable(cluster)
                 skipped += 1
         
@@ -674,6 +688,18 @@ class AIEnricher:
                 cluster.module = enriched.get('module', '')
                 cluster.severity = enriched.get('severity', 'medium')
                 cluster.action_recommendation = enriched.get('recommendation', '')
+                
+                # NEW: Apply detailed fields
+                cluster.sub_issues = enriched.get('sub_issues', [])
+                cluster.is_noise = enriched.get('is_noise', False)
+                
+                # Extract affected entities
+                affected = enriched.get('affected_entities', {})
+                if isinstance(affected, dict):
+                    cluster.affected_vessels = affected.get('vessels', [])
+                    cluster.error_codes = affected.get('error_codes', [])
+                    cluster.affected_versions = affected.get('versions', [])
+                    cluster.specific_features = affected.get('specific_features', [])
                 
                 # Save to checkpoint immediately
                 self._save_cluster_to_checkpoint(cluster)
@@ -722,6 +748,13 @@ class AIEnricher:
                 'module': cluster.module,
                 'severity': cluster.severity,
                 'recommendation': cluster.action_recommendation,
+                # NEW: Detailed fields
+                'sub_issues': cluster.sub_issues,
+                'is_noise': cluster.is_noise,
+                'affected_vessels': cluster.affected_vessels,
+                'error_codes': cluster.error_codes,
+                'affected_versions': cluster.affected_versions,
+                'specific_features': cluster.specific_features,
             })
         
         checkpoint['last_updated'] = datetime.now().isoformat()
@@ -754,22 +787,52 @@ class AIEnricher:
             return f"{hours}h {minutes}m"
     
     def _enrich_single_cluster(self, cluster: IssueCluster) -> Dict:
-        """Use AI to enrich a single cluster."""
-        # Take sample texts
-        samples = cluster.sample_texts[:AnalyzerConfig.AI_SAMPLE_SIZE]
-        sample_text = "\n---\n".join(samples)
+        """Use AI to deeply analyze a cluster and extract specific issues."""
+        # Take sample texts - use more samples for better coverage
+        samples = cluster.sample_texts[:8]  # More samples
+        sample_text = "\n\n---TICKET---\n\n".join(samples)
         
-        prompt = f"""Analyze these customer support issues (all describing the same underlying problem):
+        # Include metadata if available
+        vessels_info = f"Affected vessels: {', '.join(cluster.vessels[:10])}" if cluster.vessels else ""
+        companies_info = f"Companies: {', '.join(cluster.companies[:5])}" if cluster.companies else ""
+        
+        prompt = f"""You are analyzing a cluster of {cluster.issue_count} similar support tickets from a maritime Digital Logbooks software system.
+
+The software has these modules: Sync, Signature, ORB (Oil Record Book), Deck Log, Engine Log, Garbage Log, Ballast Log.
+
+Here are sample tickets from this cluster:
 
 {sample_text}
 
-Provide a JSON response with:
-1. "title": A clear, concise title (max 10 words) describing the issue
-2. "description": One sentence describing the problem
-3. "root_cause": Most likely root cause
-4. "module": Which product module is affected (e.g., Sync, Signature, ORB, Deck Log, or General)
-5. "severity": "high", "medium", or "low" based on impact
-6. "recommendation": One actionable recommendation to fix this
+{vessels_info}
+{companies_info}
+
+Analyze these tickets DEEPLY and provide a JSON response with:
+
+1. "title": A specific, actionable title (max 12 words) - NOT generic like "various issues" but specific like "Signature validation failing after vessel restart"
+
+2. "description": One detailed sentence describing the SPECIFIC technical problem
+
+3. "sub_issues": Array of 2-5 DISTINCT specific issues found in these tickets. Each should be a specific problem, not generic. Example: ["Sync fails with error 500 on reconnect", "Signature timestamp mismatch after timezone change"]
+
+4. "root_cause": The most likely technical root cause
+
+5. "module": Primary module affected (Sync/Signature/ORB/Deck Log/Engine Log/General)
+
+6. "severity": "high" (blocking operations), "medium" (workaround exists), or "low" (minor inconvenience)
+
+7. "affected_entities": {{
+     "vessels": ["list specific vessel names mentioned"],
+     "error_codes": ["any error codes or messages"],
+     "versions": ["any software versions mentioned"],
+     "specific_features": ["specific features affected"]
+   }}
+
+8. "recommendation": One specific, actionable fix recommendation
+
+9. "is_noise": true if this cluster is just acknowledgments, thank-you messages, or non-issues. false otherwise.
+
+Be SPECIFIC and TECHNICAL. Avoid generic descriptions. Extract actual details from the ticket content.
 
 Respond ONLY with valid JSON, no other text."""
 
@@ -777,11 +840,38 @@ Respond ONLY with valid JSON, no other text."""
         
         # Parse JSON response
         try:
-            # Find JSON in response
-            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-        except:
+            # Find JSON in response (handle nested braces)
+            # Look for outermost { }
+            brace_count = 0
+            start_idx = -1
+            end_idx = -1
+            
+            for i, char in enumerate(response):
+                if char == '{':
+                    if brace_count == 0:
+                        start_idx = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and start_idx != -1:
+                        end_idx = i + 1
+                        break
+            
+            if start_idx != -1 and end_idx != -1:
+                json_str = response[start_idx:end_idx]
+                result = json.loads(json_str)
+                
+                # Flatten sub_issues into description if present
+                if 'sub_issues' in result and result['sub_issues']:
+                    result['sub_issues_text'] = '; '.join(result['sub_issues'])
+                
+                # Mark noise clusters
+                if result.get('is_noise', False):
+                    result['severity'] = 'low'
+                    result['title'] = f"[NOISE] {result.get('title', 'Non-issue')}"
+                
+                return result
+        except Exception as e:
             pass
         
         return {}
@@ -1002,12 +1092,12 @@ class IssueReportGenerator:
         ws.column_dimensions['D'].width = 12
         
         # =====================================================================
-        # SHEET 2: All Issues (Complete Registry)
+        # SHEET 2: All Issues (Complete Registry with Details)
         # =====================================================================
         ws2 = wb.create_sheet("All Issues")
         
-        headers = ['#', 'Issue Title', 'Tickets', 'Severity', 'Module', 'Root Cause', 
-                   'Companies', 'First Seen', 'Last Seen', 'Sample Ticket IDs']
+        headers = ['#', 'Issue Title', 'Tickets', 'Severity', 'Module', 'Sub-Issues', 
+                   'Root Cause', 'Error Codes', 'Affected Vessels', 'Companies', 'Ticket IDs']
         for col, header in enumerate(headers, 1):
             cell = ws2.cell(row=1, column=col, value=header)
             cell.font = header_font
@@ -1015,7 +1105,10 @@ class IssueReportGenerator:
             cell.alignment = header_align
             cell.border = thin_border
         
-        for i, cluster in enumerate(self.clusters, 1):
+        # Filter out noise clusters for main view
+        real_issues = [c for c in self.clusters if not c.is_noise]
+        
+        for i, cluster in enumerate(real_issues, 1):
             row = i + 1
             ws2.cell(row=row, column=1, value=i).border = thin_border
             ws2.cell(row=row, column=2, value=(cluster.title or f"Issue #{cluster.cluster_id}")[:60]).border = thin_border
@@ -1030,22 +1123,29 @@ class IssueReportGenerator:
                 sev_cell.fill = med_fill
             
             ws2.cell(row=row, column=5, value=cluster.module or '').border = thin_border
-            ws2.cell(row=row, column=6, value=(cluster.root_cause or '')[:50]).border = thin_border
-            ws2.cell(row=row, column=7, value=', '.join(cluster.companies[:3])).border = thin_border
-            ws2.cell(row=row, column=8, value=cluster.first_seen[:10] if cluster.first_seen else '').border = thin_border
-            ws2.cell(row=row, column=9, value=cluster.last_seen[:10] if cluster.last_seen else '').border = thin_border
-            ws2.cell(row=row, column=10, value=', '.join(map(str, cluster.ticket_ids[:5]))).border = thin_border
+            # NEW: Sub-issues column
+            sub_issues_text = '; '.join(cluster.sub_issues[:3]) if cluster.sub_issues else ''
+            ws2.cell(row=row, column=6, value=sub_issues_text[:80]).border = thin_border
+            ws2.cell(row=row, column=7, value=(cluster.root_cause or '')[:50]).border = thin_border
+            # NEW: Error codes
+            error_codes_text = ', '.join(cluster.error_codes[:3]) if cluster.error_codes else ''
+            ws2.cell(row=row, column=8, value=error_codes_text[:40]).border = thin_border
+            # NEW: Affected vessels (from AI analysis)
+            vessels_text = ', '.join(cluster.affected_vessels[:3]) if cluster.affected_vessels else ', '.join(cluster.vessels[:3])
+            ws2.cell(row=row, column=9, value=vessels_text[:40]).border = thin_border
+            ws2.cell(row=row, column=10, value=', '.join(cluster.companies[:3])).border = thin_border
+            ws2.cell(row=row, column=11, value=', '.join(map(str, cluster.ticket_ids[:5]))).border = thin_border
             
             if row % 2 == 0:
-                for col in range(1, 11):
+                for col in range(1, 12):
                     if col != 4:  # Keep severity color
                         if not ws2.cell(row=row, column=col).fill.start_color.rgb or ws2.cell(row=row, column=col).fill.start_color.rgb == '00000000':
                             ws2.cell(row=row, column=col).fill = alt_fill
         
-        ws2.auto_filter.ref = f"A1:J{len(self.clusters)+1}"
+        ws2.auto_filter.ref = f"A1:K{len(real_issues)+1}"
         ws2.freeze_panes = 'A2'
         
-        col_widths = [5, 45, 10, 10, 12, 35, 25, 12, 12, 30]
+        col_widths = [5, 45, 8, 10, 12, 50, 35, 25, 30, 25, 25]
         for i, width in enumerate(col_widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = width
         
@@ -1058,9 +1158,9 @@ class IssueReportGenerator:
         ws3['A1'] = "⚡ ACTION REQUIRED: Issues needing immediate attention"
         ws3['A1'].font = Font(bold=True, size=12, color=Colors.LOW_CONF_TEXT)
         ws3['A1'].fill = PatternFill(start_color=Colors.LOW_CONF, end_color=Colors.LOW_CONF, fill_type="solid")
-        ws3.merge_cells('A1:G1')
+        ws3.merge_cells('A1:I1')
         
-        headers = ['Priority', 'Issue', 'Tickets', 'Severity', 'Module', 'Root Cause', 'Recommendation']
+        headers = ['Priority', 'Issue', 'Tickets', 'Severity', 'Module', 'Sub-Issues', 'Root Cause', 'Error Codes', 'Recommendation']
         for col, header in enumerate(headers, 1):
             cell = ws3.cell(row=2, column=col, value=header)
             cell.font = header_font
@@ -1068,7 +1168,9 @@ class IssueReportGenerator:
             cell.alignment = header_align
             cell.border = thin_border
         
-        actionable_sorted = sorted(actionable, 
+        # Filter actionable AND not noise
+        actionable_real = [c for c in actionable if not c.is_noise]
+        actionable_sorted = sorted(actionable_real, 
                                    key=lambda c: (0 if c.severity == 'high' else 1, -len(c.ticket_ids)))
         
         for i, cluster in enumerate(actionable_sorted, 1):
@@ -1087,18 +1189,24 @@ class IssueReportGenerator:
                 sev_cell.fill = med_fill
             
             ws3.cell(row=row, column=5, value=cluster.module or '').border = thin_border
-            ws3.cell(row=row, column=6, value=(cluster.root_cause or '')[:40]).border = thin_border
-            ws3.cell(row=row, column=7, value=(cluster.action_recommendation or '')[:50]).border = thin_border
+            # NEW: Sub-issues
+            sub_issues_text = '; '.join(cluster.sub_issues[:3]) if cluster.sub_issues else ''
+            ws3.cell(row=row, column=6, value=sub_issues_text[:60]).border = thin_border
+            ws3.cell(row=row, column=7, value=(cluster.root_cause or '')[:40]).border = thin_border
+            # NEW: Error codes
+            error_codes_text = ', '.join(cluster.error_codes[:3]) if cluster.error_codes else ''
+            ws3.cell(row=row, column=8, value=error_codes_text[:30]).border = thin_border
+            ws3.cell(row=row, column=9, value=(cluster.action_recommendation or '')[:50]).border = thin_border
             
             if row % 2 == 1:
-                for col in range(1, 8):
+                for col in range(1, 10):
                     if col != 4:
                         ws3.cell(row=row, column=col).fill = alt_fill
         
-        ws3.auto_filter.ref = f"A2:G{len(actionable_sorted)+2}"
+        ws3.auto_filter.ref = f"A2:I{len(actionable_sorted)+2}"
         ws3.freeze_panes = 'A3'
         
-        col_widths = [8, 40, 10, 10, 12, 30, 40]
+        col_widths = [8, 40, 8, 10, 12, 45, 30, 25, 40]
         for i, width in enumerate(col_widths, 1):
             ws3.column_dimensions[get_column_letter(i)].width = width
         
