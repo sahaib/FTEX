@@ -755,6 +755,11 @@ class AIEnricher:
                 'error_codes': cluster.error_codes,
                 'affected_versions': cluster.affected_versions,
                 'specific_features': cluster.specific_features,
+                # TRACEABILITY: Include ticket IDs
+                'ticket_ids': cluster.ticket_ids,
+                'ticket_count': len(cluster.ticket_ids),
+                'companies': cluster.companies[:10],
+                'vessels': cluster.vessels[:10],
             })
         
         checkpoint['last_updated'] = datetime.now().isoformat()
